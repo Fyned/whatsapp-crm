@@ -1,3 +1,4 @@
+// 1. AYARLAR VE IMPORTLAR
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') }); 
 require('dotenv').config(); 
@@ -10,7 +11,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
-// 1. SUPABASE AYARLARI
+// 2. SUPABASE BAĞLANTISI
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 
@@ -20,17 +21,20 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// 2. EXPRESS & SOCKET
+// 3. EXPRESS VE SOCKET.IO KURULUMU
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
 });
 
 app.use(cors());
 app.use(express.json());
 
-// 3. WHATSAPP CLIENT (Global Değişken)
+// 4. WHATSAPP CLIENT (Global Değişkenler)
 let client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -40,16 +44,23 @@ let client = new Client({
 });
 
 let lastQR = null; 
+let currentSessionData = { sessionName: null, userId: null }; // YENİ: Oturum bilgilerini tutmak için
 
-// --- API ENDPOINTLERİ ---
+// 5. API ENDPOINTLERİ
 
-app.get('/', (req, res) => res.send('WhatsApp CRM Backend v5 (Hard Reset)'));
+app.get('/', (req, res) => {
+    res.send('WhatsApp CRM Backend Çalışıyor v6 (DB Save Fix)');
+});
 
-// BU KISIM GÜNCELLENDİ: ZORLA YENİDEN BAŞLATMA
+// START SESSION (Hard Reset + Veri Kaydı Hazırlığı)
 app.post('/start-session', async (req, res) => {
-    console.log('>>> Session başlatma isteği geldi (Hard Reset)...');
-    
     try {
+        const { sessionName, userId } = req.body;
+        console.log(`>>> Session başlatma isteği: ${sessionName}`);
+        
+        // Bilgileri hafızaya al (Ready olduğunda kaydedeceğiz)
+        currentSessionData = { sessionName, userId };
+
         // 1. Varsa eski QR'ı temizle
         lastQR = null;
         
@@ -70,14 +81,14 @@ app.post('/start-session', async (req, res) => {
             }
         });
 
-        // 4. Eventleri tekrar bağla (Çünkü client yeniden oluştu)
+        // 4. Eventleri tekrar bağla
         setupClientEvents();
 
         // 5. Başlat
         console.log('Yeni client başlatılıyor...');
         client.initialize();
 
-        res.json({ status: 'Session initiated', message: 'Oturum sıfırlandı ve başlatılıyor' });
+        res.json({ status: 'Session initiated', message: 'Oturum başlatılıyor...' });
 
     } catch (error) {
         console.error('Session başlatma hatası:', error);
@@ -113,18 +124,28 @@ app.get('/fetch-history/:chatId', async (req, res) => {
     }
 });
 
-// --- CLIENT EVENTLERİNİ AYARLAYAN FONKSİYON ---
+// --- CLIENT EVENTLERİ ---
 function setupClientEvents() {
     client.on('qr', (qr) => {
         console.log('>>> YENİ QR KODU ÜRETİLDİ <<<');
         lastQR = qr;
-        io.emit('qr', qr); // Socket'e gönder
+        io.emit('qr', qr); 
+        
+        // Durumu güncelle: QR Bekleniyor
+        if (currentSessionData.sessionName) {
+             updateSessionStatus(currentSessionData.sessionName, 'QR_CODE', currentSessionData.userId);
+        }
     });
 
-    client.on('ready', () => {
-        console.log('WhatsApp Hazır!');
+    client.on('ready', async () => {
+        console.log('WhatsApp Hazır! Veritabanına kaydediliyor...');
         lastQR = null;
         io.emit('ready', { status: 'ready' });
+
+        // KRİTİK NOKTA: ARTIK DATABASE'E KAYDEDİYORUZ
+        if (currentSessionData.sessionName) {
+            await updateSessionStatus(currentSessionData.sessionName, 'CONNECTED', currentSessionData.userId);
+        }
     });
 
     client.on('authenticated', () => {
@@ -133,8 +154,19 @@ function setupClientEvents() {
         io.emit('ready', { status: 'authenticated' });
     });
 
+    client.on('disconnected', (reason) => {
+        console.log('WhatsApp bağlantısı koptu:', reason);
+        if (currentSessionData.sessionName) {
+             updateSessionStatus(currentSessionData.sessionName, 'DISCONNECTED', currentSessionData.userId);
+        }
+        lastQR = null;
+        client.destroy();
+        client.initialize();
+    });
+
     client.on('message', async (msg) => {
         console.log('Mesaj:', msg.body);
+        // Mesaj kaydetme mantığı aynı kalıyor...
         try {
             await supabase.from('messages').insert({
                 chat_id: msg.from,
@@ -153,14 +185,30 @@ function setupClientEvents() {
     });
 }
 
+// Veritabanı Güncelleme Yardımcısı
+async function updateSessionStatus(sessionName, status, userId) {
+    try {
+        const { error } = await supabase.from('sessions').upsert({
+            session_name: sessionName,
+            user_id: userId,
+            status: status,
+            updated_at: new Date()
+        }, { onConflict: 'session_name' }); // Session ismi benzersiz olmalı
+
+        if (error) console.error('DB Kayıt Hatası:', error.message);
+        else console.log(`DB Güncellendi: ${sessionName} -> ${status}`);
+    } catch (e) {
+        console.error('DB Update Exception:', e);
+    }
+}
+
 // İlk başlatma
 setupClientEvents();
-// client.initialize(); // Otomatik başlatmıyoruz, istek gelince başlatacağız.
 
-// --- SOCKET.IO ---
+// SOCKET
 io.on('connection', (socket) => {
     console.log('Frontend bağlandı:', socket.id);
-    if (lastQR) socket.emit('qr', lastQR); // Varsa gönder
+    if (lastQR) socket.emit('qr', lastQR); 
 });
 
 const PORT = process.env.PORT || 3006;
