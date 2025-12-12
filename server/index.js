@@ -25,16 +25,15 @@ whatsappManager.setSocketIO(io);
 
 // --- API ROTALARI ---
 
-// 1) Oturum başlatma
+// 1) Oturum başlatma (GÜNCELLENDİ: QR Kodunu bekler ve döndürür)
 app.post('/start-session', async (req, res) => {
     try {
         const { sessionName, userId } = req.body;
         if (!sessionName) {
-            return res
-                .status(400)
-                .json({ success: false, error: 'sessionName gerekli' });
+            return res.status(400).json({ success: false, error: 'sessionName gerekli' });
         }
 
+        // Veritabanı kontrolü
         const { data: existing, error } = await supabase
             .from('sessions')
             .select('*')
@@ -42,15 +41,11 @@ app.post('/start-session', async (req, res) => {
             .maybeSingle();
 
         if (error) {
-            console.error(
-                'Supabase session sorgu hatası:',
-                error.message
-            );
-            return res
-                .status(500)
-                .json({ success: false, error: 'Veritabanı hatası' });
+            console.error('Supabase session sorgu hatası:', error.message);
+            return res.status(500).json({ success: false, error: 'Veritabanı hatası' });
         }
 
+        // Oturum yoksa oluştur
         if (!existing) {
             const { error: insertError } = await supabase
                 .from('sessions')
@@ -63,28 +58,28 @@ app.post('/start-session', async (req, res) => {
                 ]);
 
             if (insertError) {
-                console.error(
-                    'Supabase session insert hatası:',
-                    insertError.message
-                );
-                return res
-                    .status(500)
-                    .json({ success: false, error: 'Veritabanı hatası' });
+                console.error('Supabase session insert hatası:', insertError.message);
+                return res.status(500).json({ success: false, error: 'Veritabanı hatası' });
             }
         }
 
-        await whatsappManager.startSession(sessionName);
-        res.json({ success: true, sessionId: sessionName });
+        // --- KRİTİK DEĞİŞİKLİK BURADA ---
+        // Manager'ın işlemi bitirmesini (QR üretmesini veya bağlanmasını) bekliyoruz.
+        // WhatsappManager.js'de startSession artık bir Promise döndürüyor.
+        const result = await whatsappManager.startSession(sessionName);
+        
+        // Sonucu (içinde qr: 'data:image...' olabilir) frontend'e gönderiyoruz.
+        res.json({ success: true, sessionId: sessionName, ...result });
+
     } catch (err) {
         console.error('start-session hata:', err.message);
-        res.status(500).json({ success: false, error: err.message });
+        res.status(500).json({ success: false, error: err.message || "Başlatma hatası" });
     }
 });
 
-// 2) Geçmiş çekme (+10 mantığı)
-// Frontend limit = mevcut mesaj sayısı + 10
+// 2) Geçmiş çekme
 app.post('/fetch-history', async (req, res) => {
-    const { sessionName, contactId, limit } = req.body;
+    const { sessionName, contactId, limit, beforeId } = req.body;
 
     if (!sessionName || !contactId) {
         return res.status(400).json({
@@ -97,7 +92,8 @@ app.post('/fetch-history', async (req, res) => {
         const result = await whatsappManager.loadHistory(
             sessionName,
             contactId,
-            limit || 10
+            limit || 20,
+            beforeId
         );
         res.json({ success: true, ...result });
     } catch (err) {
@@ -130,9 +126,7 @@ app.post('/send-message', async (req, res) => {
 app.post('/delete-session', async (req, res) => {
     const { sessionName } = req.body;
     if (!sessionName) {
-        return res
-            .status(400)
-            .json({ success: false, error: 'sessionName gerekli' });
+        return res.status(400).json({ success: false, error: 'sessionName gerekli' });
     }
 
     const { error } = await supabase
@@ -142,21 +136,17 @@ app.post('/delete-session', async (req, res) => {
 
     if (error) {
         console.error('Session silme hatası:', error.message);
-        return res
-            .status(500)
-            .json({ success: false, error: error.message });
+        return res.status(500).json({ success: false, error: error.message });
     }
 
     res.json({ success: true });
 });
 
-// 5) Aktif sohbetleri WhatsApp'tan listele (ChatList için)
+// 5) Aktif sohbetleri listele
 app.get('/session-chats', async (req, res) => {
     const { sessionName } = req.query;
     if (!sessionName) {
-        return res
-            .status(400)
-            .json({ success: false, error: 'sessionName gerekli' });
+        return res.status(400).json({ success: false, error: 'sessionName gerekli' });
     }
 
     try {
@@ -168,14 +158,12 @@ app.get('/session-chats', async (req, res) => {
     }
 });
 
-// 6) Sync butonu: tüm sohbetleri (veya seçilenleri) senkronize et
+// 6) Sync butonu
 app.post('/sync-chats', async (req, res) => {
     const { sessionName, contactIds, perChatLimit } = req.body;
 
     if (!sessionName) {
-        return res
-            .status(400)
-            .json({ success: false, error: 'sessionName gerekli' });
+        return res.status(400).json({ success: false, error: 'sessionName gerekli' });
     }
 
     try {
@@ -193,7 +181,6 @@ app.post('/sync-chats', async (req, res) => {
 });
 
 // --- SOCKET ---
-
 io.on('connection', (socket) => {
     console.log('Frontend Bağlandı:', socket.id);
 
@@ -203,8 +190,7 @@ io.on('connection', (socket) => {
     });
 });
 
-// --- BOOTSTRAP: Supabase'teki CONNECTED hatları ayağa kaldır ---
-
+// --- BOOTSTRAP ---
 async function bootstrapSessions() {
     try {
         const { data, error } = await supabase
@@ -224,10 +210,11 @@ async function bootstrapSessions() {
 
         console.log(`Session bootstrap: ${data.length} hat bulundu.`);
         for (const row of data) {
-            console.log(
-                `Session bootstrap: "${row.session_name}" (${row.status}) için WhatsApp client başlatılıyor...`
-            );
-            whatsappManager.startSession(row.session_name);
+            console.log(`Session bootstrap: "${row.session_name}" başlatılıyor...`);
+            // Bootstrap sırasında await etmeye gerek yok, hepsi paralel başlasın
+            whatsappManager.startSession(row.session_name).catch(e => {
+                console.error(`Bootstrap hatası (${row.session_name}):`, e.message);
+            });
         }
     } catch (err) {
         console.error('Session bootstrap genel hata:', err.message);
@@ -235,7 +222,6 @@ async function bootstrapSessions() {
 }
 
 // --- SUNUCUYU BAŞLAT ---
-
 server.listen(port, () => {
     console.log(`✅ SUNUCU ÇALIŞIYOR: http://localhost:${port}`);
     bootstrapSessions();
