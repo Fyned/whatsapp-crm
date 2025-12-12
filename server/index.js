@@ -1,4 +1,3 @@
-// 1. AYARLAR VE IMPORTLAR
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') }); 
 require('dotenv').config(); 
@@ -11,7 +10,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
-// 2. SUPABASE BAĞLANTISI
+// 1. SUPABASE AYARLARI
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 
@@ -21,21 +20,18 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// 3. EXPRESS VE SOCKET.IO KURULUMU
+// 2. EXPRESS & SOCKET
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 app.use(cors());
 app.use(express.json());
 
-// 4. WHATSAPP CLIENT KURULUMU
-const client = new Client({
+// 3. WHATSAPP CLIENT (Global Değişken)
+let client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
@@ -43,48 +39,53 @@ const client = new Client({
     }
 });
 
-// GLOBAL DEĞİŞKENLER (QR HAFIZASI)
-let lastQR = null; // Son üretilen QR kodunu burada tutacağız
-let isClientReady = false;
+let lastQR = null; 
 
-// 5. API ENDPOINTLERİ
+// --- API ENDPOINTLERİ ---
 
-app.get('/', (req, res) => {
-    res.send('WhatsApp CRM Backend Çalışıyor v4 (QR Fix)');
-});
+app.get('/', (req, res) => res.send('WhatsApp CRM Backend v5 (Hard Reset)'));
 
-// START SESSION ENDPOINT'İ (GÜNCELLENDİ)
+// BU KISIM GÜNCELLENDİ: ZORLA YENİDEN BAŞLATMA
 app.post('/start-session', async (req, res) => {
+    console.log('>>> Session başlatma isteği geldi (Hard Reset)...');
+    
     try {
-        console.log('Session başlatma isteği geldi...');
+        // 1. Varsa eski QR'ı temizle
+        lastQR = null;
         
-        // Eğer zaten hazırsa hemen bildir
-        if (isClientReady) {
-            io.emit('ready', { status: 'already-ready' });
-            return res.json({ status: 'already-ready', message: 'Client zaten hazır' });
-        }
-
-        // Eğer hafızada geçerli bir QR varsa, isteği atana hemen gönder (Tren kaçmasın)
-        if (lastQR) {
-            console.log('Hafızadaki QR kodu tekrar gönderiliyor...');
-            io.emit('qr', lastQR);
-        }
-
+        // 2. Client çalışıyorsa zorla durdur
+        console.log('Eski client kapatılıyor...');
         try {
-             await client.initialize();
-        } catch (error) {
-            // "Client already initialized" hatası alırsak sorun yok, devam et
-            console.log('Client durumu:', error.message);
+            await client.destroy();
+        } catch (e) {
+            console.log('Kapatma hatası (önemsiz):', e.message);
         }
-        
-        res.json({ status: 'Session initiated' });
+
+        // 3. Client'ı sıfırdan oluştur
+        client = new Client({
+            authStrategy: new LocalAuth(),
+            puppeteer: {
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+            }
+        });
+
+        // 4. Eventleri tekrar bağla (Çünkü client yeniden oluştu)
+        setupClientEvents();
+
+        // 5. Başlat
+        console.log('Yeni client başlatılıyor...');
+        client.initialize();
+
+        res.json({ status: 'Session initiated', message: 'Oturum sıfırlandı ve başlatılıyor' });
+
     } catch (error) {
         console.error('Session başlatma hatası:', error);
         res.status(500).json({ error: 'Session başlatılamadı' });
     }
 });
 
-// PAGINATION ENDPOINT
+// History Endpoint
 app.get('/fetch-history/:chatId', async (req, res) => {
     try {
         const { chatId } = req.params;
@@ -98,99 +99,70 @@ app.get('/fetch-history/:chatId', async (req, res) => {
             .order('created_at', { ascending: false })
             .limit(limit);
 
-        if (cursor) {
-            query = query.lt('created_at', cursor);
-        }
+        if (cursor) query = query.lt('created_at', cursor);
 
         const { data, error } = await query;
-
-        if (error) {
-            return res.status(500).json({ error: error.message });
-        }
+        if (error) return res.status(500).json({ error: error.message });
 
         res.json({
             messages: data, 
             nextCursor: data.length === limit ? data[data.length - 1].created_at : null
         });
-
     } catch (err) {
-        res.status(500).json({ error: 'Internal Server Error' });
+        res.status(500).json({ error: 'Server Error' });
     }
 });
 
-// 6. WHATSAPP EVENT HANDLERS
+// --- CLIENT EVENTLERİNİ AYARLAYAN FONKSİYON ---
+function setupClientEvents() {
+    client.on('qr', (qr) => {
+        console.log('>>> YENİ QR KODU ÜRETİLDİ <<<');
+        lastQR = qr;
+        io.emit('qr', qr); // Socket'e gönder
+    });
 
-client.on('qr', (qr) => {
-    console.log('QR Kodu alındı (Yeni)');
-    lastQR = qr; // QR'ı hafızaya kaydet
-    isClientReady = false;
-    io.emit('qr', qr); 
-});
+    client.on('ready', () => {
+        console.log('WhatsApp Hazır!');
+        lastQR = null;
+        io.emit('ready', { status: 'ready' });
+    });
 
-client.on('ready', () => {
-    console.log('WhatsApp İstemcisi Hazır!');
-    lastQR = null; // Bağlandık, artık QR'a gerek yok
-    isClientReady = true;
-    io.emit('ready', { status: 'ready' });
-});
+    client.on('authenticated', () => {
+        console.log('Giriş Başarılı!');
+        lastQR = null;
+        io.emit('ready', { status: 'authenticated' });
+    });
 
-client.on('authenticated', () => {
-    console.log('Giriş başarılı!');
-    lastQR = null;
-    isClientReady = true;
-    io.emit('ready', { status: 'authenticated' });
-});
+    client.on('message', async (msg) => {
+        console.log('Mesaj:', msg.body);
+        try {
+            await supabase.from('messages').insert({
+                chat_id: msg.from,
+                body: msg.body,
+                sender: 'customer',
+                is_outbound: false,
+                created_at: new Date()
+            });
+            io.emit('new-message', {
+                chat_id: msg.from,
+                body: msg.body,
+                sender: 'customer',
+                created_at: new Date()
+            });
+        } catch (e) { console.error(e); }
+    });
+}
 
-client.on('disconnected', (reason) => {
-    console.log('WhatsApp bağlantısı koptu:', reason);
-    lastQR = null;
-    isClientReady = false;
-    // Client'ı temizleyip yeniden başlatmaya hazırla
-    client.destroy();
-    client.initialize();
-});
+// İlk başlatma
+setupClientEvents();
+// client.initialize(); // Otomatik başlatmıyoruz, istek gelince başlatacağız.
 
-client.on('message', async (msg) => {
-    console.log('Yeni mesaj:', msg.body);
-    try {
-        const { error } = await supabase.from('messages').insert({
-            chat_id: msg.from,
-            body: msg.body,
-            sender: 'customer',
-            is_outbound: false,
-            created_at: new Date()
-        });
-        if (error) console.error('Mesaj kaydetme hatası:', error);
-        
-        io.emit('new-message', {
-            chat_id: msg.from,
-            body: msg.body,
-            sender: 'customer',
-            created_at: new Date()
-        });
-    } catch (e) {
-        console.error('Mesaj işleme hatası:', e);
-    }
-});
-
-// 7. SOCKET.IO BAĞLANTILARI
+// --- SOCKET.IO ---
 io.on('connection', (socket) => {
     console.log('Frontend bağlandı:', socket.id);
-    
-    // Yeni bağlanan kişiye (sayfayı yenileyene) varsa hemen son durumu at
-    if (lastQR) {
-        socket.emit('qr', lastQR);
-    }
-    if (isClientReady) {
-        socket.emit('ready', { status: 'already-ready' });
-    }
-
-    socket.on('disconnect', () => {
-        console.log('Frontend ayrıldı:', socket.id);
-    });
+    if (lastQR) socket.emit('qr', lastQR); // Varsa gönder
 });
 
-// 8. SUNUCUYU BAŞLAT
 const PORT = process.env.PORT || 3006;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Sunucu ${PORT} portunda çalışıyor`);
