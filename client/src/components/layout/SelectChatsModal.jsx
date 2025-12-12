@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { X, Search, CheckSquare, Square, RefreshCw } from 'lucide-react';
 
-// GARANTİ ÇÖZÜM: IP Adresini direkt yazıyoruz.
-const API_URL = "http://16.171.142.245:3006";
+// DİNAMİK URL
+const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
 
 export default function SelectChatsModal({ session, onClose, onImported }) {
   const [loading, setLoading] = useState(true);

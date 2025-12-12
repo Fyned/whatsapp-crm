@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { LogOut, Plus, MessageSquare, Phone, Trash2 } from 'lucide-react';
 
+// DİNAMİK URL EKLENDİ
+const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
+
 export default function Sidebar({
   onSelectSession,
   activeSessionId,
@@ -55,7 +58,8 @@ export default function Sidebar({
       return;
 
     try {
-      await fetch('http://localhost:3006/delete-session', {
+      // DİNAMİK URL BURADA KULLANILIYOR
+      await fetch(`${API_URL}/delete-session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionName }),

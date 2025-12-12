@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react';
 import { User, Search, RefreshCw } from 'lucide-react';
 import SelectChatsModal from './SelectChatsModal';
 
-// GARANTİ ÇÖZÜM: IP Adresini direkt yazıyoruz.
-const API_URL = "http://16.171.142.245:3006";
+// DİNAMİK URL: Tarayıcı adres çubuğundaki adresi alır, 3006 portuna gider.
+const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
 
 export default function ChatList({
   activeSession,

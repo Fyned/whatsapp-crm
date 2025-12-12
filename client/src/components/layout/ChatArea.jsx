@@ -2,8 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import { Send, MoreVertical, Phone, DownloadCloud, History } from 'lucide-react';
 
-// GARANTİ ÇÖZÜM: IP Adresini direkt yazıyoruz.
-const API_URL = "http://16.171.142.245:3006";
+// DİNAMİK URL
+const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
 
 export default function ChatArea({ activeSession, activeContact }) {
   const [messages, setMessages] = useState([]);
