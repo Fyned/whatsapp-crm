@@ -2,10 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import { Send, MoreVertical, Phone, DownloadCloud, History } from 'lucide-react';
 
-// DİNAMİK URL AYARI
-const API_URL = window.location.hostname === 'localhost' 
-  ? 'http://localhost:3006' 
-  : `http://${window.location.hostname}:3006`;
+// GARANTİ ÇÖZÜM: IP Adresini direkt yazıyoruz.
+const API_URL = "http://16.171.142.245:3006";
 
 export default function ChatArea({ activeSession, activeContact }) {
   const [messages, setMessages] = useState([]);
@@ -101,7 +99,7 @@ export default function ChatArea({ activeSession, activeContact }) {
             body: JSON.stringify({
                 sessionName: activeSession.session_name,
                 contactId: targetNumber,
-                limit: 20, // 10'arlı mesaj yerine 20'şer daha mantıklı
+                limit: 20,
                 beforeId: oldestMessageId 
             })
         });

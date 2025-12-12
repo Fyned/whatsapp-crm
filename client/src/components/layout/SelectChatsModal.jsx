@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react';
 import { X, Search, CheckSquare, Square, RefreshCw } from 'lucide-react';
 
-// DİNAMİK URL AYARI
-const API_URL = window.location.hostname === 'localhost' 
-  ? 'http://localhost:3006' 
-  : `http://${window.location.hostname}:3006`;
+// GARANTİ ÇÖZÜM: IP Adresini direkt yazıyoruz.
+const API_URL = "http://16.171.142.245:3006";
 
 export default function SelectChatsModal({ session, onClose, onImported }) {
   const [loading, setLoading] = useState(true);
@@ -22,7 +20,6 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
   const fetchChats = async () => {
     setLoading(true);
     try {
-      // Backend rotası: /session-chats
       const res = await fetch(
         `${API_URL}/session-chats?sessionName=${encodeURIComponent(session.session_name)}`
       );
@@ -57,7 +54,6 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
     }
     setImporting(true);
     try {
-      // Backend rotası: /sync-chats (Toplu sync için)
       const res = await fetch(`${API_URL}/sync-chats`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -3,10 +3,8 @@ import { supabase } from '../../lib/supabase';
 import io from 'socket.io-client';
 import { X, Loader2, Smartphone } from 'lucide-react';
 
-// DİNAMİK URL AYARI
-const SOCKET_URL = window.location.hostname === 'localhost' 
-  ? 'http://localhost:3006' 
-  : `http://${window.location.hostname}:3006`;
+// GARANTİ ÇÖZÜM: IP Adresini direkt yazıyoruz.
+const SOCKET_URL = "http://16.171.142.245:3006";
 
 export default function AddSessionModal({ onClose }) {
   const [step, setStep] = useState(1); 
@@ -18,9 +16,13 @@ export default function AddSessionModal({ onClose }) {
   const targetSessionRef = useRef(null);
 
   useEffect(() => {
-    // Socket'i dinamik URL ile başlat
+    // Socket bağlantısını başlat
     socketRef.current = io(SOCKET_URL);
     
+    socketRef.current.on('connect', () => {
+        console.log("Socket sunucuya bağlandı:", SOCKET_URL);
+    });
+
     socketRef.current.on('qr_code', (data) => {
         if (data.sessionId === targetSessionRef.current) {
             const code = data.qr || data.image;
@@ -54,7 +56,6 @@ export default function AddSessionModal({ onClose }) {
     const { data: { user } } = await supabase.auth.getUser();
     
     try {
-        // Fetch isteği de dinamik URL'ye gider
         const res = await fetch(`${SOCKET_URL}/start-session`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
