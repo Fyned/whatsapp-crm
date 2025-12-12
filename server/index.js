@@ -51,22 +51,16 @@ app.get('/', (req, res) => {
     res.send('WhatsApp CRM Backend Çalışıyor v3');
 });
 
-// EKSİK OLAN START SESSION ENDPOINT'İ (DÜZELTİLDİ)
+// EKSİK OLAN START SESSION ENDPOINT'İ (BU EKLENDİ)
 app.post('/start-session', async (req, res) => {
     try {
         console.log('Session başlatma isteği geldi...');
-        // Client zaten hazırsa veya başlatılıyorsa
         try {
-             // Eğer initialize edilmemişse initialize etmeyi dene
-             // Not: whatsapp-web.js'de durumu kontrol etmek biraz trickli olabilir, 
-             // en basiti initialize() çağırıp hata verirse yakalamaktır.
              await client.initialize();
         } catch (error) {
-            // Zaten initialize edilmiş olabilir, devam et.
             console.log('Client zaten initialize edilmiş veya bir hata oluştu:', error.message);
         }
-        
-        res.json({ status: 'Session initated' });
+        res.json({ status: 'Session initiated' });
     } catch (error) {
         console.error('Session başlatma hatası:', error);
         res.status(500).json({ error: 'Session başlatılamadı' });
@@ -111,40 +105,33 @@ app.get('/fetch-history/:chatId', async (req, res) => {
 
 // 6. WHATSAPP EVENT HANDLERS
 
-// QR Kodu Oluşunca
 client.on('qr', (qr) => {
     console.log('QR Kodu alındı');
-    // qrcode.generate(qr, { small: true }); // Terminalde görmek istersen aç
     io.emit('qr', qr); 
 });
 
-// Hazır Olunca
 client.on('ready', () => {
     console.log('WhatsApp İstemcisi Hazır!');
     io.emit('ready', { status: 'ready' });
 });
 
-// Authenticated
 client.on('authenticated', () => {
     console.log('Giriş başarılı!');
     io.emit('ready', { status: 'authenticated' });
 });
 
-// Mesaj Gelince
 client.on('message', async (msg) => {
     console.log('Yeni mesaj:', msg.body);
-    
     try {
+        // Hata almamak için yeni sütunları şimdilik null geçiyoruz
+        // (Eğer SQL komutunu çalıştırdıysan sorun yok)
         const { error } = await supabase.from('messages').insert({
             chat_id: msg.from,
             body: msg.body,
             sender: 'customer',
             is_outbound: false,
-            media_url: null,
-            media_type: msg.type,
             created_at: new Date()
         });
-
         if (error) console.error('Mesaj kaydetme hatası:', error);
         
         io.emit('new-message', {
@@ -153,7 +140,6 @@ client.on('message', async (msg) => {
             sender: 'customer',
             created_at: new Date()
         });
-        
     } catch (e) {
         console.error('Mesaj işleme hatası:', e);
     }
