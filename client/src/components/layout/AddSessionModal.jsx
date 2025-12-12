@@ -3,7 +3,9 @@ import { supabase } from '../../lib/supabase';
 import io from 'socket.io-client';
 import { X, Loader2, Smartphone } from 'lucide-react';
 
-const SOCKET_URL = "http://localhost:3006";
+const SOCKET_URL = window.location.hostname === 'localhost' 
+  ? 'http://localhost:3006' 
+  : `http://${window.location.hostname}:3006`;
 
 export default function AddSessionModal({ onClose }) {
   const [step, setStep] = useState(1); 

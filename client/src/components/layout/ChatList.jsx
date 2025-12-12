@@ -1,6 +1,11 @@
 import { useState, useEffect } from 'react';
 import { User, Search, RefreshCw } from 'lucide-react';
-import SelectChatsModal from './SelectChatsModal'; // <-- YENİ EKLENDİ
+import SelectChatsModal from './SelectChatsModal';
+
+// URL Ayarı: Localhost ise 3006, Sunucu ise sunucu IP'si:3006
+const API_URL = window.location.hostname === 'localhost' 
+  ? 'http://localhost:3006' 
+  : `http://${window.location.hostname}:3006`;
 
 export default function ChatList({
   activeSession,
@@ -11,7 +16,7 @@ export default function ChatList({
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
   
-  // Modal kontrolü için yeni state
+  // Modal kontrolü
   const [isSelectModalOpen, setIsSelectModalOpen] = useState(false);
 
   useEffect(() => {
@@ -28,8 +33,9 @@ export default function ChatList({
 
     setLoading(true);
     try {
+      // DÜZELTME: API_URL kullanımı
       const res = await fetch(
-        `http://localhost:3006/session-chats?sessionName=${encodeURIComponent(
+        `${API_URL}/session-chats?sessionName=${encodeURIComponent(
           activeSession.session_name
         )}`
       );
@@ -73,13 +79,13 @@ export default function ChatList({
         </div>
       </div>
 
-      {/* Başlık + Sync butonu */}
+      {/* Başlık + İçe Aktar butonu */}
       <div className="px-4 py-2 border-b bg-white flex items-center justify-between">
         <span className="text-xs text-gray-500 uppercase font-bold tracking-wider">
           Sohbetler ({contacts.length})
         </span>
         <button
-          onClick={() => setIsSelectModalOpen(true)} // <-- MODAL AÇILIYOR
+          onClick={() => setIsSelectModalOpen(true)}
           disabled={!activeSession}
           className="flex items-center gap-1 text-xs text-green-600 hover:text-green-700 disabled:opacity-50"
           title="Sohbetleri seç ve içe aktar"

@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react';
 import { X, Search, CheckSquare, Square, RefreshCw } from 'lucide-react';
 
 // AWS veya Localhost ayarı (Vite environment variable'dan veya direkt string)
-const API_URL = "http://localhost:3006"; 
+const API_URL = window.location.hostname === 'localhost' 
+  ? 'http://localhost:3006' 
+  : `http://${window.location.hostname}:3006`;
 
 export default function SelectChatsModal({ session, onClose, onImported }) {
   const [loading, setLoading] = useState(true);
