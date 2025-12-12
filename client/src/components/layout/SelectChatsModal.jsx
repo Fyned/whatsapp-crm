@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { X, Search, CheckSquare, Square } from 'lucide-react';
+import { X, Search, CheckSquare, Square, RefreshCw } from 'lucide-react';
 
-const API_URL = "http://localhost:3006";
+// AWS veya Localhost ayarı (Vite environment variable'dan veya direkt string)
+const API_URL = "http://localhost:3006"; 
 
 export default function SelectChatsModal({ session, onClose, onImported }) {
   const [loading, setLoading] = useState(true);
@@ -19,12 +20,12 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
   const fetchChats = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/list-chats`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionName: session.session_name }),
-      });
+      // DÜZELTME 1: Doğru endpoint ve GET isteği
+      const res = await fetch(
+        `${API_URL}/session-chats?sessionName=${encodeURIComponent(session.session_name)}`
+      );
       const data = await res.json();
+      
       if (data.success) {
         setChats(data.chats || []);
       } else {
@@ -54,18 +55,21 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
     }
     setImporting(true);
     try {
-      const res = await fetch(`${API_URL}/import-chats`, {
+      // DÜZELTME 2: Doğru endpoint (/sync-chats) ve parametre isimleri
+      const res = await fetch(`${API_URL}/sync-chats`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionName: session.session_name,
-          chatIds: Array.from(selected),
+          contactIds: Array.from(selected), // Backend 'contactIds' bekliyor
+          perChatLimit: 20 // Varsayılan limit
         }),
       });
+      
       const data = await res.json();
       if (data.success) {
         alert(
-          `Sohbet import tamamlandı. İşlenen sohbet sayısı: ${data.count}/${data.total}`
+          `İşlem Tamamlandı!\nİşlenen Sohbet: ${data.processedChats}\nToplam Mesaj: ${data.totalMessages}`
         );
         if (onImported) onImported();
         onClose();
@@ -81,8 +85,8 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
   };
 
   const filteredChats = chats.filter((c) => {
-    const name = (c.push_name || c.name || '').toLowerCase();
-    const phone = (c.number || '').toLowerCase();
+    const name = (c.push_name || c.phone_number || '').toLowerCase();
+    const phone = (c.phone_number || '').toLowerCase();
     const term = searchTerm.toLowerCase();
     return name.includes(term) || phone.includes(term);
   });
@@ -93,9 +97,9 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
         {/* Header */}
         <div className="p-4 border-b flex items-center justify-between bg-gray-50">
           <div>
-            <h2 className="font-bold text-gray-800 text-sm">Sohbetleri Senkronize Et</h2>
+            <h2 className="font-bold text-gray-800 text-sm">Sohbetleri Seç ve Aktar</h2>
             <p className="text-xs text-gray-500">
-              Hat: <span className="font-mono">{session?.session_name}</span>
+              Hat: <span className="font-mono font-medium">{session?.session_name}</span>
             </p>
           </div>
           <button onClick={onClose}>
@@ -120,33 +124,46 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
         {/* List */}
         <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <div className="p-6 text-center text-gray-400 text-sm">
-              Sohbetler yükleniyor...
+            <div className="p-10 text-center text-gray-400 text-sm flex flex-col items-center gap-2">
+              <RefreshCw className="animate-spin" size={24}/>
+              <p>Sohbet listesi WhatsApp'tan çekiliyor...</p>
             </div>
           ) : filteredChats.length === 0 ? (
-            <div className="p-6 text-center text-gray-400 text-sm">
-              Aktif sohbet bulunamadı.
+            <div className="p-10 text-center text-gray-400 text-sm">
+              Görüntülenecek sohbet bulunamadı.
             </div>
           ) : (
             filteredChats.map((chat) => {
-              const isSelected = selected.has(chat.chatId);
-              const title = chat.push_name || chat.name || chat.number || chat.cleanContactId;
+              // Chat objesinden ID'yi al (formatId ile temizlenmiş id veya chatId)
+              // ChatList componentinden gelen yapıda 'id' temizlenmiş id idi.
+              const uniqueId = chat.id; 
+              const isSelected = selected.has(uniqueId);
+              
               return (
                 <button
-                  key={chat.chatId}
+                  key={uniqueId}
                   type="button"
-                  onClick={() => toggleSelect(chat.chatId)}
-                  className="w-full flex items-center gap-3 px-4 py-2 border-b border-gray-100 hover:bg-gray-50 text-left text-sm"
+                  onClick={() => toggleSelect(uniqueId)}
+                  className={`w-full flex items-center gap-3 px-4 py-3 border-b border-gray-100 text-left text-sm transition
+                    ${isSelected ? 'bg-green-50' : 'hover:bg-gray-50'}
+                  `}
                 >
-                  <div className="text-green-600">
-                    {isSelected ? <CheckSquare size={18} /> : <Square size={18} />}
+                  <div className={isSelected ? "text-green-600" : "text-gray-300"}>
+                    {isSelected ? <CheckSquare size={20} /> : <Square size={20} />}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="font-medium text-gray-800 truncate">{title}</div>
+                    <div className="font-semibold text-gray-800 truncate">
+                        {chat.push_name || chat.phone_number}
+                    </div>
                     <div className="text-[11px] text-gray-500 truncate font-mono">
-                      {chat.number || chat.cleanContactId}
+                      {chat.phone_number}
                     </div>
                   </div>
+                  {chat.unread > 0 && (
+                      <span className="bg-green-500 text-white text-[10px] px-2 py-0.5 rounded-full">
+                          {chat.unread}
+                      </span>
+                  )}
                 </button>
               );
             })
@@ -155,22 +172,23 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
 
         {/* Footer */}
         <div className="p-4 border-t bg-gray-50 flex items-center justify-between text-xs">
-          <span className="text-gray-500">
-            Seçili sohbet: <strong>{selected.size}</strong>
+          <span className="text-gray-600 font-medium">
+            Seçili: <strong className="text-green-600 text-sm">{selected.size}</strong> sohbet
           </span>
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="px-3 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-100"
+              className="px-4 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-100 transition"
             >
-              İptal
+              Vazgeç
             </button>
             <button
               onClick={handleImport}
               disabled={importing || selected.size === 0}
-              className="px-4 py-2 rounded-lg bg-green-600 text-white font-semibold text-xs hover:bg-green-700 disabled:opacity-50"
+              className="px-6 py-2 rounded-lg bg-green-600 text-white font-bold text-xs hover:bg-green-700 disabled:opacity-50 flex items-center gap-2 transition shadow-lg shadow-green-200"
             >
-              {importing ? 'Aktarılıyor...' : 'Seçilenleri İçe Aktar'}
+              {importing && <RefreshCw className="animate-spin" size={14}/>}
+              {importing ? 'Aktarılıyor...' : 'Aktarımı Başlat'}
             </button>
           </div>
         </div>
