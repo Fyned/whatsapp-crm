@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import { Send, MoreVertical, Phone, DownloadCloud, History } from 'lucide-react';
 
-// URL Ayarı
+// DİNAMİK URL AYARI
 const API_URL = window.location.hostname === 'localhost' 
   ? 'http://localhost:3006' 
   : `http://${window.location.hostname}:3006`;
@@ -95,14 +95,13 @@ export default function ChatArea({ activeSession, activeContact }) {
       
       setLoadingHistory(true);
       try {
-        // DÜZELTME: API_URL kullanımı
         const res = await fetch(`${API_URL}/fetch-history`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 sessionName: activeSession.session_name,
                 contactId: targetNumber,
-                limit: 20,
+                limit: 20, // 10'arlı mesaj yerine 20'şer daha mantıklı
                 beforeId: oldestMessageId 
             })
         });
@@ -134,7 +133,6 @@ export default function ChatArea({ activeSession, activeContact }) {
     setNewMessage(''); 
 
     try {
-        // DÜZELTME: API_URL kullanımı
         await fetch(`${API_URL}/send-message`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -198,7 +196,7 @@ export default function ChatArea({ activeSession, activeContact }) {
                 className="flex items-center gap-2 bg-green-50 text-green-700 px-3 py-1.5 rounded-lg hover:bg-green-100 border border-green-200 text-xs font-bold transition disabled:opacity-50"
             >
                 {loadingHistory ? <span className="animate-spin">⌛</span> : <DownloadCloud size={14}/>}
-                <span>{oldestMessageId ? "Daha Eski 20 Mesaj" : "Son 20 Mesajı İndir"}</span>
+                <span>{oldestMessageId ? "Daha Eski Mesajlar" : "Geçmişi İndir"}</span>
             </button>
         </div>
       </div>
@@ -209,7 +207,7 @@ export default function ChatArea({ activeSession, activeContact }) {
             <div className="text-center mt-10 opacity-80">
                 <div className="bg-white px-4 py-2 rounded-lg shadow inline-block text-xs text-gray-500">
                     Henüz görüntülenen mesaj yok. <br/>
-                    "Son 20 Mesajı İndir" butonuna basarak geçmişi getirebilirsiniz.
+                    "Geçmişi İndir" butonuna basarak eski mesajları çekebilirsiniz.
                 </div>
             </div>
         )}

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { User, Search, RefreshCw } from 'lucide-react';
 import SelectChatsModal from './SelectChatsModal';
 
-// URL Ayarı: Localhost ise 3006, Sunucu ise sunucu IP'si:3006
+// DİNAMİK URL AYARI
 const API_URL = window.location.hostname === 'localhost' 
   ? 'http://localhost:3006' 
   : `http://${window.location.hostname}:3006`;
@@ -33,7 +33,6 @@ export default function ChatList({
 
     setLoading(true);
     try {
-      // DÜZELTME: API_URL kullanımı
       const res = await fetch(
         `${API_URL}/session-chats?sessionName=${encodeURIComponent(
           activeSession.session_name

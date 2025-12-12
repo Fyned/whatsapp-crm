@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X, Search, CheckSquare, Square, RefreshCw } from 'lucide-react';
 
-// AWS veya Localhost ayarı (Vite environment variable'dan veya direkt string)
+// DİNAMİK URL AYARI
 const API_URL = window.location.hostname === 'localhost' 
   ? 'http://localhost:3006' 
   : `http://${window.location.hostname}:3006`;
@@ -22,7 +22,7 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
   const fetchChats = async () => {
     setLoading(true);
     try {
-      // DÜZELTME 1: Doğru endpoint ve GET isteği
+      // Backend rotası: /session-chats
       const res = await fetch(
         `${API_URL}/session-chats?sessionName=${encodeURIComponent(session.session_name)}`
       );
@@ -57,14 +57,14 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
     }
     setImporting(true);
     try {
-      // DÜZELTME 2: Doğru endpoint (/sync-chats) ve parametre isimleri
+      // Backend rotası: /sync-chats (Toplu sync için)
       const res = await fetch(`${API_URL}/sync-chats`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionName: session.session_name,
-          contactIds: Array.from(selected), // Backend 'contactIds' bekliyor
-          perChatLimit: 20 // Varsayılan limit
+          contactIds: Array.from(selected), 
+          perChatLimit: 20
         }),
       });
       
@@ -136,8 +136,6 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
             </div>
           ) : (
             filteredChats.map((chat) => {
-              // Chat objesinden ID'yi al (formatId ile temizlenmiş id veya chatId)
-              // ChatList componentinden gelen yapıda 'id' temizlenmiş id idi.
               const uniqueId = chat.id; 
               const isSelected = selected.has(uniqueId);
               
