@@ -1,0 +1,13 @@
+{
+  "welcome": "WhatsApp CRM'e Hoşgeldiniz",
+  "login_title": "Hesabınıza Giriş Yapın",
+  "email": "E-posta Adresi",
+  "password": "Şifre",
+  "login_button": "Giriş Yap",
+  "register_button": "Kayıt Ol",
+  "loading": "İşleniyor...",
+  "error_login": "Giriş başarısız. Bilgileri kontrol edin.",
+  "success_login": "Giriş başarılı! Yönlendiriliyorsunuz...",
+  "landing_hero": "Müşterilerinizi Tek Ekrandan Yönetin",
+  "landing_sub": "10 farklı WhatsApp numarasını tek panelde birleştirin. Takımınızla senkronize çalışın."
+}

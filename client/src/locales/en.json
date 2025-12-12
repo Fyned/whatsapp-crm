@@ -1,0 +1,13 @@
+{
+  "welcome": "Welcome to WhatsApp CRM",
+  "login_title": "Sign in to your account",
+  "email": "Email Address",
+  "password": "Password",
+  "login_button": "Sign In",
+  "register_button": "Sign Up",
+  "loading": "Processing...",
+  "error_login": "Login failed. Check your credentials.",
+  "success_login": "Login successful! Redirecting...",
+  "landing_hero": "Manage Your Customers in One Place",
+  "landing_sub": "Unify 10 WhatsApp numbers in a single dashboard. Work synchronously with your team."
+}
