@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { User, Search, RefreshCw } from 'lucide-react';
-import SelectChatsModal from './SelectChatsModal'; // <-- EKLENDİ
+import SelectChatsModal from './SelectChatsModal'; // <-- YENİ EKLENDİ
 
 export default function ChatList({
   activeSession,
@@ -11,7 +11,7 @@ export default function ChatList({
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
   
-  // Modal State
+  // Modal kontrolü için yeni state
   const [isSelectModalOpen, setIsSelectModalOpen] = useState(false);
 
   useEffect(() => {
