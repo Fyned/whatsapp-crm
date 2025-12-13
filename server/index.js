@@ -9,15 +9,13 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
-// --- SUPABASE & SERVER ---
+// --- AYARLAR ---
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
-if (!supabaseUrl || !supabaseKey) console.error('❌ HATA: .env eksik!');
+if (!supabaseUrl || !supabaseKey) console.error('❌ .env EKSİK!');
 
-const supabase = createClient(supabaseUrl, supabaseKey, {
-    auth: { autoRefreshToken: false, persistSession: false }
-});
+const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
 
 const app = express();
 const server = http.createServer(app);
@@ -31,52 +29,63 @@ let client = null;
 let lastQR = null;
 let currentSessionData = { sessionName: null, userId: null };
 
-// --- CLIENT SETUP ---
+// --- CLIENT ---
 function initializeClient() {
     console.log('🔄 WhatsApp Başlatılıyor...');
-    
-    // Puppeteer ayarlarını güçlendirdik
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: {
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
         }
     });
 
-    client.on('qr', (qr) => {
-        console.log('🎫 QR Hazır');
-        lastQR = qr;
-        io.emit('qr', qr);
-    });
-
-    client.on('ready', async () => {
-        console.log('🚀 WhatsApp BAĞLANDI!');
+    client.on('qr', (qr) => { console.log('🎫 QR Hazır'); lastQR = qr; io.emit('qr', qr); });
+    client.on('ready', async () => { 
+        console.log('🚀 WhatsApp BAĞLANDI!'); 
         io.emit('ready', { status: 'ready' });
         if (currentSessionData.sessionName) await updateSessionStatus('CONNECTED');
     });
-
     client.on('authenticated', () => io.emit('ready', { status: 'authenticated' }));
-    
     client.on('disconnected', async () => {
-        console.log('⚠️ Bağlantı Koptu');
+        console.log('⚠️ Koptu');
         if (currentSessionData.sessionName) await updateSessionStatus('DISCONNECTED');
         try { await client.destroy(); } catch(e) {}
         initializeClient();
     });
 
+    // Gelen mesajı kaydet
     client.on('message', async (msg) => {
         if (!currentSessionData.sessionName) return;
         try {
             const { data: session } = await supabase.from('sessions').select('id').eq('session_name', currentSessionData.sessionName).single();
-            if (session) {
-                await saveMessagesToDb(session.id, [msg]);
-                io.emit('new-message', { chat_id: msg.from, body: msg.body });
-            }
+            if (session) await saveMessagesToDb(session.id, [msg]);
         } catch (e) {}
     });
 
     client.initialize();
+}
+
+// YARDIMCI: DB KAYIT (Toplu)
+async function saveMessagesToDb(sessionId, messages) {
+    if (!messages || messages.length === 0) return;
+    
+    const messagesToInsert = messages.map(msg => ({
+        session_id: sessionId,
+        contact_id: msg.from.replace(/\D/g, '') || msg.to.replace(/\D/g, ''),
+        whatsapp_id: msg.id._serialized, // Unique ID
+        chat_id: msg.from,
+        body: msg.body,
+        sender: msg.fromMe ? 'me' : 'customer',
+        is_outbound: msg.fromMe,
+        timestamp: msg.timestamp,
+        created_at: new Date(msg.timestamp * 1000)
+    }));
+
+    // Hata olsa bile (örn: duplicate key) devam et
+    const { error } = await supabase.from('messages').upsert(messagesToInsert, { onConflict: 'whatsapp_id' });
+    if (error) console.error('DB Insert Error:', error.message);
+    else console.log(`💾 ${messages.length} mesaj DB'ye yazıldı/güncellendi.`);
 }
 
 async function updateSessionStatus(status) {
@@ -90,28 +99,7 @@ async function updateSessionStatus(status) {
     } catch (e) {}
 }
 
-// Mesajları DB'ye kaydeden yardımcı fonksiyon
-async function saveMessagesToDb(sessionId, messages) {
-    if (!messages.length) return;
-    
-    const messagesToInsert = messages.map(msg => ({
-        session_id: sessionId,
-        contact_id: msg.from.replace(/\D/g, '') || msg.to.replace(/\D/g, ''), // Hem gelen hem giden için numara
-        whatsapp_id: msg.id._serialized,
-        chat_id: msg.from, 
-        body: msg.body,
-        sender: msg.fromMe ? 'me' : 'customer',
-        is_outbound: msg.fromMe,
-        timestamp: msg.timestamp,
-        created_at: new Date(msg.timestamp * 1000)
-    }));
-
-    // ID çakışması varsa güncelleme yapma (ignore)
-    const { error } = await supabase.from('messages').upsert(messagesToInsert, { onConflict: 'whatsapp_id' });
-    if (error) console.error('DB Insert Error:', error.message);
-}
-
-// --- API ENDPOINTLERİ ---
+// --- API ---
 
 app.post('/start-session', async (req, res) => {
     const { sessionName, userId } = req.body;
@@ -123,17 +111,48 @@ app.post('/start-session', async (req, res) => {
     res.json({ success: true });
 });
 
-// --- GARANTİLİ GEÇMİŞ İNDİRME ---
+// --- GARANTİ GEÇMİŞ ÇEKME ---
 app.post('/fetch-history', async (req, res) => {
     const { sessionName, contactId, limit = 20, beforeId } = req.body;
-    console.log(`📥 Geçmiş İsteği: ${contactId}, Limit: ${limit}, Cursor: ${beforeId || 'Yok'}`);
+    console.log(`📥 Fetch İsteği: ${contactId}, Limit: ${limit}, Cursor: ${beforeId}`);
 
     try {
-        // 1. Session ID
+        // 1. Session ve WhatsApp ID
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
         if (!session) return res.status(400).json({ error: 'Oturum yok' });
 
-        // 2. Önce DB'den çek
+        const whatsappId = contactId.includes('@') ? contactId : `${contactId}@c.us`;
+
+        // 2. WHATSAPP'TAN ZORLA ÇEK (Source of Truth)
+        // Veritabanına bakmadan önce WhatsApp'tan taze veri çekip DB'yi güncelliyoruz.
+        // Bu sayede "DB'de yoktu, eksikti" derdi kalmıyor.
+        if (client && client.info) {
+            console.log(`🌍 WhatsApp'a gidiliyor...`);
+            const chat = await client.getChatById(whatsappId);
+            
+            // Cursor varsa onu bul, yoksa son 50 mesajı al
+            let fetchOptions = { limit: 50 }; // Default: Son 50 mesaj
+            
+            if (beforeId) {
+                // WWebJS cursor mantığı bazen restart'ta kaybolur.
+                // O yüzden cursor bulamazsak "daha çok mesaj çek" diyeceğiz.
+                // Bu strateji boşlukları doldurur.
+                console.log(`🔍 Cursor (${beforeId}) aranıyor...`);
+                // Mesajları tarayıp cursor'u bulmaya çalışmıyoruz, direkt geniş aralık çekiyoruz.
+                fetchOptions = { limit: 100 }; 
+            }
+
+            const waMessages = await chat.fetchMessages(fetchOptions);
+            console.log(`📦 WhatsApp'tan ${waMessages.length} mesaj geldi.`);
+            
+            // DB'ye Yaz
+            await saveMessagesToDb(session.id, waMessages);
+        } else {
+            console.log('⚠️ WhatsApp bağlı değil, sadece DB kullanılacak.');
+        }
+
+        // 3. DB'den Geri Oku (PAGINATION)
+        // Artık veriler DB'de güncel, standart sorgumuzu yapabiliriz.
         let query = supabase.from('messages')
             .select('*')
             .eq('session_id', session.id)
@@ -146,56 +165,12 @@ app.post('/fetch-history', async (req, res) => {
             if (refMsg) query = query.lt('timestamp', refMsg.timestamp);
         }
 
-        const { data: dbMessages } = await query;
+        const { data: finalMessages } = await query;
 
-        // 3. Eğer DB'de yeterli veri varsa, WhatsApp'a gitme
-        if (dbMessages && dbMessages.length >= limit) {
-            console.log(`✅ DB'den ${dbMessages.length} mesaj döndü.`);
-            return res.json({ success: true, messages: dbMessages.reverse(), source: 'db' });
-        }
-
-        // 4. DB yetersiz, WhatsApp'tan ZORLA çek
-        if (!client || !client.info) return res.json({ success: true, messages: dbMessages ? dbMessages.reverse() : [] });
-
-        const chatId = contactId.includes('@') ? contactId : `${contactId}@c.us`;
-        const chat = await client.getChatById(chatId);
-
-        // KADEMELİ FETCH STRATEJİSİ:
-        // Eğer cursor varsa ama WWebJS bulamıyorsa, "öncekileri" getiremez.
-        // Bu yüzden "son X mesajı" getir diyerek aralığı genişletiyoruz.
-        // Örneğin: Önce 50 çek, yetmediyse 200 çek, yetmediyse 500 çek.
-        
-        let fetchCount = 50;
-        if (beforeId) fetchCount = 200; // Eğer geçmişe gidiyorsak daha büyük parça al
-        
-        console.log(`🌍 WhatsApp'tan son ${fetchCount} mesaj çekiliyor...`);
-        const waMessages = await chat.fetchMessages({ limit: fetchCount });
-
-        // DB'ye Kaydet
-        await saveMessagesToDb(session.id, waMessages);
-
-        // Tekrar DB'den Sorgula (Artık veriler DB'de olmalı)
-        // Cursor mantığını koruyarak tekrar sorguluyoruz
-        let finalQuery = supabase.from('messages')
-            .select('*')
-            .eq('session_id', session.id)
-            .eq('contact_id', contactId)
-            .order('timestamp', { ascending: false })
-            .limit(limit); // Frontend ne kadar istediyse o kadar dön
-
-        if (beforeId) {
-             const { data: refMsg2 } = await supabase.from('messages').select('timestamp').eq('whatsapp_id', beforeId).single();
-             if (refMsg2) finalQuery = finalQuery.lt('timestamp', refMsg2.timestamp);
-        }
-
-        const { data: finalMessages } = await finalQuery;
-
-        console.log(`✅ WhatsApp sync sonrası ${finalMessages?.length} mesaj dönüyor.`);
-        
         res.json({ 
             success: true, 
             messages: finalMessages ? finalMessages.reverse() : [],
-            source: 'whatsapp_sync'
+            source: 'hybrid'
         });
 
     } catch (error) {
@@ -214,16 +189,10 @@ app.post('/send-message', async (req, res) => {
 });
 
 app.get('/session-chats', async (req, res) => {
-    try {
-        if (!client) return res.json({ success: false });
-        const chats = await client.getChats();
-        res.json({ success: true, chats: chats.map(c => ({
-            id: c.id._serialized, name: c.name, phone_number: c.id.user, unread: c.unreadCount
-        }))});
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    if (!client) return res.json({ success: false });
+    const chats = await client.getChats();
+    res.json({ success: true, chats: chats.map(c => ({ id: c.id._serialized, name: c.name, phone_number: c.id.user, unread: c.unreadCount }))});
 });
-
-app.post('/sync-chats', async(req,res) => res.json({success:true})); // Placeholder
 
 initializeClient();
 
