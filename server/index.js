@@ -1,5 +1,4 @@
 const path = require('path');
-// .env dosyasını doğru yerden oku (server klasörünün bir üstünde)
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') }); 
 
 const express = require('express');
@@ -11,7 +10,7 @@ const whatsappManager = require('./src/core/WhatsappManager');
 const app = express();
 const server = http.createServer(app);
 
-// CORS Ayarları (Tüm portlardan gelen isteklere izin ver)
+// CORS: Tüm portlara izin ver
 const io = new Server(server, { 
     cors: { origin: "*", methods: ["GET", "POST"] } 
 });
@@ -19,44 +18,41 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Socket.io'yu Manager'a tanıt (QR kodları ve durum güncellemeleri için)
+// Socket.io'yu Manager'a bağla
 whatsappManager.setSocketIO(io);
 
-// --- API ENDPOINTLERİ ---
+// --- API ROUTES ---
 
-// 1. Yeni Oturum Başlatma (QR Oluşturur)
+// 1. Oturum Başlat
 app.post('/start-session', async (req, res) => {
     const { sessionName, userId } = req.body;
     if (!sessionName) return res.status(400).json({ error: 'Session ismi gerekli' });
-
     try {
         await whatsappManager.startSession(sessionName, userId);
-        res.json({ success: true, message: 'Oturum başlatma isteği alındı' });
+        res.json({ success: true, message: 'Başlatılıyor...' });
     } catch (error) {
-        console.error("Start Session Error:", error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// 2. Sohbet Listesini Getir
+// 2. Sohbetleri Getir
 app.get('/session-chats', async (req, res) => {
     const { sessionName } = req.query;
     try {
         const chats = await whatsappManager.listChats(sessionName);
         res.json({ success: true, chats });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// 3. Mesaj Geçmişini Getir
+// 3. Geçmiş Mesajları Getir
 app.post('/fetch-history', async (req, res) => {
     const { sessionName, contactId, limit, beforeId } = req.body;
     try {
         const result = await whatsappManager.loadHistory(sessionName, contactId, limit, beforeId);
         res.json({ success: true, ...result });
     } catch (error) {
-        console.error("Fetch History Error:", error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -72,7 +68,7 @@ app.post('/send-message', async (req, res) => {
     }
 });
 
-// 5. Oturumu Sil
+// 5. Oturum Sil
 app.post('/delete-session', async (req, res) => {
     const { sessionName } = req.body;
     try {
@@ -83,8 +79,7 @@ app.post('/delete-session', async (req, res) => {
     }
 });
 
-// Sunucuyu Başlat
 const PORT = process.env.PORT || 3006;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Sunucu ${PORT} portunda çalışıyor.`);
+    console.log(`✅ Backend Sunucusu ${PORT} portunda hazır!`);
 });
