@@ -3,14 +3,18 @@ import Sidebar from '../components/layout/Sidebar';
 import ChatList from '../components/layout/ChatList';
 import ChatArea from '../components/layout/ChatArea';
 import AddSessionModal from '../components/layout/AddSessionModal';
-import RightSidebar from '../components/layout/RightSidebar'; // Yeni ekledik
-import { PanelRightOpen, PanelRightClose } from 'lucide-react'; // İkonlar
+import RightSidebar from '../components/layout/RightSidebar';
+import { PanelRightOpen, PanelRightClose } from 'lucide-react';
 
 export default function Dashboard() {
   const [activeSession, setActiveSession] = useState(null);
   const [activeContact, setActiveContact] = useState(null);
+  
+  // Modal Yönetimi
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(false); // Sağ menü durumu
+  const [qrSessionName, setQrSessionName] = useState(null); // Düzenlenecek/QR gösterilecek session
+
+  const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(false);
 
   const handleSessionChange = (session) => {
     setActiveSession(session);
@@ -20,20 +24,29 @@ export default function Dashboard() {
 
   const handleContactSelect = (contact) => {
     setActiveContact(contact);
-    // Yeni bir kişi seçilince sağ menüyü otomatik açmak istersen burayı true yapabilirsin
-    // setIsRightSidebarOpen(true); 
+  };
+
+  // Yeni Hat Ekleme
+  const openNewSessionModal = () => {
+    setQrSessionName(null); // Yeni
+    setIsAddModalOpen(true);
+  };
+
+  // Mevcut Hattın QR'ını Göster
+  const openQrModal = (sessionName) => {
+    setQrSessionName(sessionName); // Mevcut
+    setIsAddModalOpen(true);
   };
 
   return (
     <div className="flex h-screen bg-gray-100 overflow-hidden">
-      {/* 1. Sol Menü (Hatlar) */}
       <Sidebar
         activeSessionId={activeSession?.id}
         onSelectSession={handleSessionChange}
-        onAddNew={() => setIsAddModalOpen(true)}
+        onAddNew={openNewSessionModal}
+        onShowQR={openQrModal} // Bu prop'u ekledik
       />
 
-      {/* 2. Orta Menü (Sohbet Listesi) */}
       {activeSession ? (
         <ChatList
           activeSession={activeSession}
@@ -46,15 +59,12 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* 3. Ana Ekran (Chat Area) */}
       <div className="flex-1 flex flex-col relative">
-        {/* Sağ Menü Aç/Kapa Butonu (ChatArea'nın Header'ında da olabilir ama burada global tutuyoruz) */}
         {activeContact && (
             <div className="absolute top-3 right-4 z-50">
                 <button 
                     onClick={() => setIsRightSidebarOpen(!isRightSidebarOpen)}
                     className="p-2 bg-white shadow-md rounded-full text-gray-600 hover:text-green-600 border border-gray-200 transition"
-                    title="Müşteri Bilgileri"
                 >
                     {isRightSidebarOpen ? <PanelRightClose size={20}/> : <PanelRightOpen size={20}/>}
                 </button>
@@ -67,24 +77,19 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* 4. Sağ Menü (Müşteri Bilgileri) */}
       {isRightSidebarOpen && activeContact && (
         <RightSidebar 
             activeSession={activeSession}
             activeContact={activeContact}
             onClose={() => setIsRightSidebarOpen(false)}
-            onUpdate={() => {
-                // Burada ChatList'i yenilemek için bir mekanizma kurulabilir
-                // Şimdilik sadece sayfayı yenilemeden veriyi güncelledik
-                console.log("Kişi güncellendi");
-            }}
         />
       )}
 
-      {/* QR Modal */}
+      {/* QR MODAL */}
       {isAddModalOpen && (
         <AddSessionModal
           onClose={() => setIsAddModalOpen(false)}
+          initialSessionName={qrSessionName} // Varsa ismi gönder
         />
       )}
     </div>

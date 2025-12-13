@@ -51,15 +51,18 @@ class WhatsappManager {
         client.on('qr', async (qr) => {
             try {
                 const qrImage = await qrcode.toDataURL(qr);
-                if (this.io) this.io.emit('qr', qrImage);
+                if (this.io) this.io.emit('qr', { sessionName, qr: qrImage });
                 await supabase.from('sessions').update({ qr_code: qrImage, status: 'QR_READY' }).eq('session_name', sessionName);
             } catch (e) {}
         });
 
         client.on('ready', async () => {
             console.log(`[${sessionName}] ✅ BAĞLANDI!`);
-            if (this.io) this.io.emit('ready', { sessionName });
+            
+            // Önce DB Güncelle
             await supabase.from('sessions').update({ status: 'CONNECTED', qr_code: null }).eq('session_name', sessionName);
+            
+            if (this.io) this.io.emit('ready', { sessionName });
         });
 
         client.on('message_create', async (msg) => {
@@ -67,11 +70,14 @@ class WhatsappManager {
             await this.saveMessageToDb(sessionName, msg);
         });
 
-        client.on('disconnected', async () => {
+        client.on('disconnected', async (reason) => {
+            console.log(`[${sessionName}] Koptu: ${reason}`);
             await supabase.from('sessions').update({ status: 'DISCONNECTED' }).eq('session_name', sessionName);
             try { await client.destroy(); } catch(e) {}
             this.sessions.delete(sessionName);
+            
             await sleep(5000);
+            
             const { data: s } = await supabase.from('sessions').select('user_id').eq('session_name', sessionName).single();
             this.startSession(sessionName, s?.user_id, false);
         });
@@ -84,6 +90,7 @@ class WhatsappManager {
         }
     }
 
+    // --- SOHBET LİSTESİ (SEÇİM İÇİN) ---
     async getRawChats(sessionName) {
         const client = this.sessions.get(sessionName);
         if (!client) throw new Error('Oturum bağlı değil');
@@ -99,14 +106,12 @@ class WhatsappManager {
             }));
     }
 
-    // --- YENİ EKLENEN: TAM GEÇMİŞ SENKRONİZASYONU (ULTIMATE SYNC) ---
+    // --- TOPLU VE GÜVENLİ SENKRONİZASYON ---
     async syncSelectedChats(sessionName, contactIds) {
         const client = this.sessions.get(sessionName);
         if (!client) throw new Error('Oturum bağlı değil');
 
-        console.log(`[${sessionName}] ${contactIds.length} sohbet için TAM GEÇMİŞ senkronizasyonu başlatılıyor...`);
-        
-        // İşlemi asenkron başlatıyoruz, API cevabını beklemesin diye (Timeout yememesi için)
+        // Arka planda başlat
         this.processFullSync(client, sessionName, contactIds);
 
         return { success: true, message: 'Arka planda başlatıldı.' };
@@ -121,7 +126,7 @@ class WhatsappManager {
                 const chat = await client.getChatById(chatId);
                 const contactName = chat.name || chat.id.user;
 
-                // Socket: "Şu an bu sohbet işleniyor"
+                // Bildirim: Başladı
                 if(this.io) this.io.emit('sync_status', {
                     current: index + 1,
                     total: contactIds.length,
@@ -133,14 +138,13 @@ class WhatsappManager {
                 let fetchedCount = 0;
                 let keepFetching = true;
 
-                // SONSUZ DÖNGÜ (Tüm geçmiş bitene kadar)
+                // GEÇMİŞİ ÇEKME DÖNGÜSÜ
                 while (keepFetching) {
-                    // İNSANSI BEKLEME: Her istek arasında 1-2.5 saniye bekle
-                    // Bu, WhatsApp'ın "Bot bu" demesini engeller.
-                    const randomDelay = Math.floor(Math.random() * 1500) + 1000;
+                    // SPAM KORUMASI: Her istekte 1.5 - 2.5 saniye bekle
+                    const randomDelay = Math.floor(Math.random() * 1000) + 1500;
                     await sleep(randomDelay);
 
-                    const options = { limit: 50 }; // Her seferinde 50 mesaj
+                    const options = { limit: 50 }; // 50'şer paketler halinde
                     if (lastMsgId) {
                         options.before = lastMsgId;
                     }
@@ -148,12 +152,11 @@ class WhatsappManager {
                     const messages = await chat.fetchMessages(options);
 
                     if (!messages || messages.length === 0) {
-                        keepFetching = false; // Mesaj bitti, döngüden çık
+                        keepFetching = false;
                         break;
                     }
 
-                    // En eski mesajın ID'sini al (Bir sonraki turda bundan öncesini çekeceğiz)
-                    // messages[0] genelde en eskidir.
+                    // En eski mesajın ID'sini al (pagination için)
                     lastMsgId = messages[0].id._serialized;
 
                     // Kaydet
@@ -163,13 +166,14 @@ class WhatsappManager {
 
                     fetchedCount += messages.length;
 
-                    // Socket: İlerlemeyi bildir
+                    // Bildirim: İlerleme
                     if(this.io) this.io.emit('sync_progress', {
                         chatName: contactName,
                         count: fetchedCount
                     });
 
-                    console.log(`[Sync] ${contactName}: ${fetchedCount} mesaj çekildi. (Son: ${messages[0].timestamp})`);
+                    // Güvenlik Limiti (Opsiyonel): Bir sohbetten max 3000 mesaj çekip durabiliriz
+                    // if (fetchedCount > 3000) break;
                 }
 
                 totalProcessed++;
@@ -179,15 +183,15 @@ class WhatsappManager {
             }
         }
 
+        // Bildirim: Bitti
         if(this.io) this.io.emit('sync_complete', {
             total: totalProcessed
         });
-        console.log(`[${sessionName}] Toplu işlem bitti.`);
     }
 
     async saveMessageToDb(sessionName, msg) {
         try {
-            // Hızlıca var mı diye bak
+            // Hız kontrolü: Zaten varsa geç
             const { data: existing } = await supabase.from('messages').select('id').eq('whatsapp_id', msg.id._serialized).maybeSingle();
             if (existing) return;
 
@@ -200,6 +204,7 @@ class WhatsappManager {
             
             if (rawContactId.includes('@g.us')) return; 
 
+            // Medya İşlemleri
             let mediaUrl = null;
             let mimetype = null;
             let finalBody = msg.body;
@@ -211,11 +216,14 @@ class WhatsappManager {
                         const extension = mime.extension(media.mimetype) || 'bin';
                         const fileName = `${msg.id.id}.${extension}`;
                         const filePath = path.join(__dirname, '../../public/media', fileName);
+                        
                         const dir = path.dirname(filePath);
                         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
                         fs.writeFileSync(filePath, media.data, 'base64');
                         mediaUrl = `/media/${fileName}`;
                         mimetype = media.mimetype;
+                        
                         if (!finalBody) finalBody = media.filename || `[Dosya]`;
                     }
                 } catch (e) {}
@@ -223,6 +231,7 @@ class WhatsappManager {
 
             const contactName = msg._data?.notifyName || msg._data?.pushname || contactPhone;
             
+            // Kişiyi Güncelle
             await supabase.from('contacts').upsert({
                 session_id: session.id,
                 phone_number: contactPhone,
@@ -230,6 +239,7 @@ class WhatsappManager {
                 updated_at: new Date()
             }, { onConflict: 'session_id, phone_number' });
 
+            // Mesajı Ekle
             await supabase.from('messages').insert({
                 session_id: session.id,
                 contact_id: contactPhone,
@@ -249,10 +259,14 @@ class WhatsappManager {
     }
 
     async listChats(sessionName) {
+        // Offline Mod: Önce DB'den getir, Client varsa güncellemek yerine DB verisi gösterilir (Hız için)
+        // İstenirse hibrit yapılabilir ama offline öncelikli daha stabil.
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
         if (!session) return [];
+        
         const { data: contacts } = await supabase.from('contacts').select('*').eq('session_id', session.id).order('updated_at', { ascending: false });
         if (!contacts) return [];
+        
         return contacts.map(c => ({
             id: c.phone_number + '@c.us',
             phone_number: c.phone_number,
@@ -267,38 +281,35 @@ class WhatsappManager {
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
         if (!session) throw new Error('Session yok');
 
+        // 1. DB'den çek
         let query = supabase.from('messages').select('*').eq('session_id', session.id).eq('contact_id', contactNumber).order('timestamp', { ascending: false }).limit(limit);
+        
         if (beforeId) {
             const { data: refMsg } = await supabase.from('messages').select('timestamp').eq('whatsapp_id', beforeId).single();
             if (refMsg) query = query.lt('timestamp', refMsg.timestamp);
         }
+        
         const { data: dbMessages } = await query;
 
-        // DB Yetersizse ve Bağlıysa -> WhatsApp'a Git
-        if ((!dbMessages || dbMessages.length < limit) && client) {
+        // 2. DB boşsa ve Client bağlıysa -> WhatsApp'tan ilk paketi çek
+        if ((!dbMessages || dbMessages.length < limit) && client && !beforeId) {
             try {
                 const chatId = `${contactNumber}@c.us`;
                 const chat = await client.getChatById(chatId);
-                const fetchedMessages = await chat.fetchMessages({ limit: limit + 30 });
+                const fetchedMessages = await chat.fetchMessages({ limit: limit + 20 });
                 for (const msg of fetchedMessages) { await this.saveMessageToDb(sessionName, msg); }
                 
-                const { data: refreshed } = await supabase.from('messages')
-                    .select('*')
-                    .eq('session_id', session.id)
-                    .eq('contact_id', contactNumber)
-                    .order('timestamp', { ascending: false })
-                    .limit(limit)
-                    .lt('timestamp', beforeId ? (await supabase.from('messages').select('timestamp').eq('whatsapp_id', beforeId).single()).data.timestamp : 99999999999);
-                    
+                const { data: refreshed } = await supabase.from('messages').select('*').eq('session_id', session.id).eq('contact_id', contactNumber).order('timestamp', { ascending: false }).limit(limit);
                 return { messages: refreshed ? refreshed.reverse() : [] };
             } catch (e) {}
         }
+        
         return { messages: dbMessages ? dbMessages.reverse() : [] };
     }
 
     async sendMessage(sessionName, targetNumber, text) {
         const client = this.sessions.get(sessionName);
-        if (!client) throw new Error('Offline');
+        if (!client) throw new Error('Offline modda mesaj gönderilemez.');
         const chatId = `${targetNumber}@c.us`;
         const msg = await client.sendMessage(chatId, text);
         await this.saveMessageToDb(sessionName, msg);
