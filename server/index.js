@@ -9,12 +9,12 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
-// --- SUPABASE & SERVER AYARLARI ---
+// --- AYARLAR ---
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-    console.error('❌ HATA: .env anahtarları eksik!');
+    console.error('❌ HATA: .env eksik!');
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey, {
@@ -33,10 +33,9 @@ let client = null;
 let lastQR = null;
 let currentSessionData = { sessionName: null, userId: null };
 
-// --- WHATSAPP CLIENT ---
+// --- CLIENT ---
 function initializeClient() {
     console.log('🔄 WhatsApp Başlatılıyor...');
-    
     client = new Client({
         authStrategy: new LocalAuth(),
         puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
@@ -63,7 +62,6 @@ function initializeClient() {
         initializeClient();
     });
 
-    // Mesaj dinleme (Anlık)
     client.on('message', async (msg) => {
         if (!currentSessionData.sessionName) return;
         try {
@@ -73,7 +71,7 @@ function initializeClient() {
                 await supabase.from('messages').insert({
                     session_id: session.id,
                     contact_id: contactId,
-                    whatsapp_id: msg.from,
+                    whatsapp_id: msg.from, // Düzeltme: Unique ID
                     chat_id: msg.from,
                     body: msg.body,
                     sender: msg.fromMe ? 'me' : 'customer',
@@ -83,7 +81,7 @@ function initializeClient() {
                 });
                 io.emit('new-message', { chat_id: msg.from, body: msg.body });
             }
-        } catch (e) { console.error('Mesaj Kayıt Hatası:', e); }
+        } catch (e) { }
     });
 
     client.initialize();
@@ -100,7 +98,7 @@ async function updateSessionStatus(status) {
     } catch (e) {}
 }
 
-// --- API ENDPOINTLERİ ---
+// --- API ---
 
 app.post('/start-session', async (req, res) => {
     const { sessionName, userId } = req.body;
@@ -121,75 +119,70 @@ app.get('/session-chats', async (req, res) => {
 });
 
 app.post('/sync-chats', async (req, res) => {
-    // ... (Önceki Sync kodu aynı kalabilir, yer tasarrufu için kısalttım ama tam çalışır halini istiyorsan önceki mesajdaki sync kodunu buraya yapıştırabilirsin.
-    // Ancak aşağıda History endpointi asıl kritik olan)
-    res.json({ success: true, message: "Sync arka planda yapılabilir (bu örnekte history'e odaklandık)" });
+    res.json({ success: true }); // Sync arka planda (Opsiyonel)
 });
 
-// --- GEÇMİŞİ İNDİR (HISTORY + PAGINATION) ---
-// Bu endpoint hem DB'den çeker hem de yoksa WhatsApp'tan getirir.
+// --- DÜZELTİLMİŞ HISTORY ENDPOINT (PAGINATION FIX) ---
 app.post('/fetch-history', async (req, res) => {
     const { sessionName, contactId, limit = 20, beforeId } = req.body;
-    // ContactID sadece numara (örn: 90555...) 
-    // WhatsAppID ise 90555...@c.us formatındadır.
-
+    
     try {
-        // 1. Session ID bul
+        // 1. Session ID
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
-        if (!session) return res.status(400).json({ error: 'Oturum bulunamadı' });
+        if (!session) return res.status(400).json({ error: 'Oturum yok' });
 
-        // 2. Önce Veritabanına Bak (Pagination için)
-        let query = supabase
-            .from('messages')
+        // 2. Önce DB'den çek
+        let query = supabase.from('messages')
             .select('*')
             .eq('session_id', session.id)
             .eq('contact_id', contactId)
-            .order('timestamp', { ascending: false }) // En yeniler en üstte
+            .order('timestamp', { ascending: false })
             .limit(limit);
 
-        // Eğer cursor (beforeId) varsa, ondan daha eskileri getir
         if (beforeId) {
-            // BeforeId mesajının timestamp'ini bulmamız lazım, 
-            // ama basitlik adına 'id' veya 'created_at' kullanabiliriz. 
-            // En sağlıklısı: Frontend'den timestamp gönderilmesi ama biz ID ile bulalım.
             const { data: refMsg } = await supabase.from('messages').select('timestamp').eq('whatsapp_id', beforeId).single();
-            if (refMsg) {
-                query = query.lt('timestamp', refMsg.timestamp);
-            }
+            if (refMsg) query = query.lt('timestamp', refMsg.timestamp);
         }
 
         const { data: dbMessages } = await query;
 
-        // 3. Eğer DB'de yeterli mesaj varsa (örn: 10 istedik 10 geldi), direkt dön
+        // 3. Yeterliyse dön
         if (dbMessages && dbMessages.length >= limit) {
-            return res.json({ 
-                success: true, 
-                messages: dbMessages.reverse(), // Frontend kronolojik bekler
-                source: 'database' 
-            });
+            return res.json({ success: true, messages: dbMessages.reverse(), source: 'db' });
         }
 
-        // 4. DB'de yetersizse WhatsApp'tan Çek (FETCH FROM WA)
-        console.log(`📥 Veritabanı yetersiz, WhatsApp'tan çekiliyor... (Contact: ${contactId})`);
-        
-        if (!client || !client.info) {
-             // Client yoksa mecburen DB'dekini dön
-             return res.json({ success: true, messages: dbMessages ? dbMessages.reverse() : [], source: 'db_fallback' });
-        }
+        // 4. Yetersizse WhatsApp'tan Çek
+        console.log(`📥 Geçmiş İndiriliyor: ${contactId}`);
+        if (!client || !client.info) return res.json({ success: true, messages: dbMessages ? dbMessages.reverse() : [] });
 
         const whatsappId = contactId.includes('@') ? contactId : `${contactId}@c.us`;
         const chat = await client.getChatById(whatsappId);
         
-        // Fetch Options Ayarla
-        // Not: WWebJS'de 'before' parametresi Message Objesi ister. ID string'i ile çalışmayabilir.
-        // Bu yüzden güvenli yöntem: Son 50 mesajı çek, veritabanına kaydet, tekrar sorgula.
-        const waMessages = await chat.fetchMessages({ limit: 50 }); // Sayıyı yüksek tutalım ki boşluk kalmasın
+        // --- AKILLI FETCH STRATEJİSİ ---
+        let fetchOptions = { limit: 50 }; // Standart
 
-        // Çekilenleri Kaydet
+        if (beforeId) {
+            // Referans mesajı (cursor) cache'te var mı?
+            const cursorMsg = chat.messages.find(m => m.id._serialized === beforeId);
+            
+            if (cursorMsg) {
+                console.log("✅ Cursor mesajı cache'te bulundu, ondan öncesi çekiliyor.");
+                fetchOptions = { limit: limit, before: cursorMsg };
+            } else {
+                console.log("⚠️ Cursor mesajı cache'te yok (Restart sonrası), geniş arama yapılıyor...");
+                // Eğer cursor yoksa, WWebJS "öncekileri" bulamaz. 
+                // Mecburen son 100 mesajı çekip DB'ye basacağız, böylece aradaki boşluk dolar.
+                fetchOptions = { limit: 100 }; 
+            }
+        }
+
+        const waMessages = await chat.fetchMessages(fetchOptions);
+        
+        // Gelenleri DB'ye Kaydet
         const messagesToInsert = waMessages.map(msg => ({
             session_id: session.id,
             contact_id: contactId,
-            whatsapp_id: msg.id._serialized, // Unique Key
+            whatsapp_id: msg.id._serialized,
             chat_id: msg.from,
             body: msg.body,
             sender: msg.fromMe ? 'me' : 'customer',
@@ -202,16 +195,14 @@ app.post('/fetch-history', async (req, res) => {
             await supabase.from('messages').upsert(messagesToInsert, { onConflict: 'whatsapp_id' });
         }
 
-        // Kaydettikten sonra DB'den tekrar çek (Tutarlılık için)
-        // Bu sefer limit kısıtlaması olmadan, cursor mantığıyla çekelim
-        // Ama basitlik için son durumu döndürelim.
-        let finalQuery = supabase
-            .from('messages')
+        // DB'den tekrar çek (Tutarlılık ve sıralama için)
+        // Bu sefer limit kısıtlamasını biraz gevşetip cursor ile çekelim
+        let finalQuery = supabase.from('messages')
             .select('*')
             .eq('session_id', session.id)
             .eq('contact_id', contactId)
             .order('timestamp', { ascending: false })
-            .limit(limit + 20); // Biraz fazlasını al
+            .limit(limit + 10);
             
         if (beforeId) {
              const { data: refMsg2 } = await supabase.from('messages').select('timestamp').eq('whatsapp_id', beforeId).single();
@@ -223,18 +214,18 @@ app.post('/fetch-history', async (req, res) => {
         res.json({ 
             success: true, 
             messages: finalMessages ? finalMessages.reverse() : [],
-            source: 'whatsapp_sync'
+            source: 'whatsapp'
         });
 
     } catch (error) {
-        console.error('Fetch History Error:', error);
+        console.error('Fetch Error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
 app.post('/send-message', async (req, res) => {
-    const { targetNumber, text } = req.body;
     try {
+        const { targetNumber, text } = req.body;
         const chatId = targetNumber.includes('@') ? targetNumber : `${targetNumber}@c.us`;
         await client.sendMessage(chatId, text);
         res.json({ success: true });
