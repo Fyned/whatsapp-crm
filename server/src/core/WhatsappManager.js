@@ -3,7 +3,7 @@ const qrcode = require('qrcode');
 const supabase = require('../db');
 const fs = require('fs');
 const path = require('path');
-const mime = require('mime-types'); // Dosya uzantısı için (yoksa npm install mime-types yap)
+const mime = require('mime-types');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const cleanPhone = (id) => id ? id.replace(/\D/g, '') : null;
@@ -18,10 +18,12 @@ class WhatsappManager {
     setSocketIO(io) { this.io = io; }
 
     async restoreSessions() {
-        const { data: sessions } = await supabase.from('sessions').select('*').eq('status', 'CONNECTED');
+        // Tüm oturumları kontrol et, kopanları da yeniden başlat ki QR üretsin
+        const { data: sessions } = await supabase.from('sessions').select('*');
         if (sessions && sessions.length > 0) {
-            console.log(`🔄 ${sessions.length} oturum geri yükleniyor...`);
+            console.log(`🔄 ${sessions.length} oturum durumu kontrol ediliyor...`);
             for (const s of sessions) {
+                // Eğer sistem kapanmadan önce bağlıysa veya QR bekliyorsa, tekrar başlat
                 this.startSession(s.session_name, s.user_id, true);
             }
         }
@@ -29,8 +31,10 @@ class WhatsappManager {
 
     async startSession(sessionName, userId = null, isRestoring = false) {
         if (this.sessions.has(sessionName)) return;
+
         console.log(`[${sessionName}] Başlatılıyor...`);
         
+        // İlk kez başlatılıyorsa DB'ye yaz
         if (!isRestoring) {
             await supabase.from('sessions').upsert({
                 session_name: sessionName,
@@ -47,42 +51,82 @@ class WhatsappManager {
             }
         });
 
+        // 1. QR Kod: Bağlantı yoksa sürekli yeni QR üretir
         client.on('qr', async (qr) => {
-            console.log(`[${sessionName}] QR Geldi.`);
+            console.log(`[${sessionName}] QR Kodu Hazır.`);
             try {
                 const qrImage = await qrcode.toDataURL(qr);
                 if (this.io) this.io.emit('qr', qrImage);
-                await supabase.from('sessions').update({ qr_code: qrImage, status: 'QR_READY' }).eq('session_name', sessionName);
+                
+                await supabase.from('sessions')
+                    .update({ qr_code: qrImage, status: 'QR_READY' })
+                    .eq('session_name', sessionName);
             } catch (e) { console.error('QR Error:', e); }
         });
 
+        // 2. Bağlantı Başarılı
         client.on('ready', async () => {
             console.log(`[${sessionName}] ✅ BAĞLANDI!`);
             if (this.io) this.io.emit('ready', { sessionName });
-            await supabase.from('sessions').update({ status: 'CONNECTED', qr_code: null }).eq('session_name', sessionName);
+            await supabase.from('sessions')
+                .update({ status: 'CONNECTED', qr_code: null })
+                .eq('session_name', sessionName);
+            
+            // Bağlanınca son eksikleri tamamla (Hızlı Sync)
+            this.syncRecentChats(client, sessionName);
         });
 
+        // 3. Mesaj Geldiğinde
         client.on('message_create', async (msg) => {
             if (msg.from === 'status@broadcast') return;
             await this.saveMessageToDb(sessionName, msg);
         });
 
-        client.on('disconnected', async () => {
-            console.log(`[${sessionName}] Koptu.`);
+        // 4. BAĞLANTI KOPTUĞUNDA (OTOMATİK YENİLEME)
+        client.on('disconnected', async (reason) => {
+            console.log(`[${sessionName}] Bağlantı koptu (${reason}). Yeniden başlatılıyor...`);
+            
+            // Durumu güncelle
             await supabase.from('sessions').update({ status: 'DISCONNECTED' }).eq('session_name', sessionName);
+            
+            // Client'ı temizle
+            try { await client.destroy(); } catch(e) {}
             this.sessions.delete(sessionName);
+
+            // 5 saniye bekle ve sistemi sıfırdan başlat (Sonsuz QR döngüsü için)
+            await sleep(5000);
+            
+            // User ID'yi veritabanından bulup tekrar başlatıyoruz
+            const { data: s } = await supabase.from('sessions').select('user_id').eq('session_name', sessionName).single();
+            this.startSession(sessionName, s?.user_id, false);
         });
 
         try {
             await client.initialize();
             this.sessions.set(sessionName, client);
         } catch (err) {
-            console.error(`[${sessionName}] Başlatma hatası:`, err.message);
+            console.error(`[${sessionName}] Kritik Hata:`, err.message);
+            // Hata durumunda da yeniden denesin
+            setTimeout(() => this.startSession(sessionName, userId, false), 10000);
         }
     }
 
+    // --- AKILLI MESAJ KAYDI (TEKRARI ÖNLER) ---
     async saveMessageToDb(sessionName, msg) {
         try {
+            // 1. Önce bu mesaj veritabanında var mı diye bak (PERFORMANS İÇİN KRİTİK)
+            // Eğer varsa, medya indirme vs. ile uğraşma, direkt çık.
+            const { data: existing } = await supabase
+                .from('messages')
+                .select('id')
+                .eq('whatsapp_id', msg.id._serialized)
+                .maybeSingle();
+
+            if (existing) {
+                // Mesaj zaten var, işlem yapma
+                return;
+            }
+
             const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
             if (!session) return;
 
@@ -92,33 +136,32 @@ class WhatsappManager {
             
             if (rawContactId.includes('@g.us')) return; 
 
-            // Medya İşleme
+            // Medya İndirme (Sadece yeni mesajsa buraya gelir)
             let mediaUrl = null;
             let mimetype = null;
+            let finalBody = msg.body;
             
             if (msg.hasMedia) {
                 try {
                     const media = await msg.downloadMedia();
                     if (media) {
-                        // Dosya uzantısını bul
                         const extension = mime.extension(media.mimetype) || 'bin';
                         const fileName = `${msg.id.id}.${extension}`;
                         const filePath = path.join(__dirname, '../../public/media', fileName);
                         
-                        // Klasör yoksa oluştur (Garanti olsun)
                         const dir = path.dirname(filePath);
                         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-                        // Dosyayı kaydet
                         fs.writeFileSync(filePath, media.data, 'base64');
                         
-                        // URL oluştur (Frontend buradan erişecek)
                         mediaUrl = `/media/${fileName}`;
                         mimetype = media.mimetype;
-                        console.log(`📁 Medya kaydedildi: ${fileName}`);
+                        
+                        // Dosya mesajlarında body genelde boştur, dosya adını yazalım
+                        if (!finalBody) finalBody = media.filename || `[Dosya: ${extension}]`;
                     }
                 } catch (e) {
-                    console.error('Medya indirme hatası:', e.message);
+                    console.error('Medya hatası:', e.message);
                 }
             }
 
@@ -131,26 +174,49 @@ class WhatsappManager {
                 updated_at: new Date()
             }, { onConflict: 'session_id, phone_number' });
 
-            await supabase.from('messages').upsert({
+            await supabase.from('messages').insert({ // Upsert yerine Insert çünkü yukarıda kontrol ettik
                 session_id: session.id,
                 contact_id: contactPhone,
                 whatsapp_id: msg.id._serialized,
-                body: msg.body,
+                body: finalBody,
                 type: msg.type,
-                media_url: mediaUrl, // Yeni alan
-                mimetype: mimetype,  // Yeni alan
+                media_url: mediaUrl,
+                mimetype: mimetype,
                 is_outbound: isOutbound,
                 timestamp: msg.timestamp,
                 created_at: new Date(msg.timestamp * 1000)
-            }, { onConflict: 'whatsapp_id' });
+            });
 
-        } catch (err) { console.error('DB Kayıt Hatası:', err); }
+        } catch (err) { 
+            // Unique key hatası gelirse (aynı anda çift istek) yoksay
+            if (err.code !== '23505') console.error('DB Kayıt Hatası:', err.message); 
+        }
     }
 
+    // --- BAĞLANINCA YAPILACAK HIZLI SENKRONİZASYON ---
+    async syncRecentChats(client, sessionName) {
+        // Son 5 sohbetin son 10 mesajını kontrol et
+        // Bu sayede telefon kapalıyken gelen mesajlar sisteme düşer
+        try {
+            const chats = await client.getChats();
+            const recentChats = chats.slice(0, 5); // Sadece en aktif 5 sohbet
+            
+            for (const chat of recentChats) {
+                const messages = await chat.fetchMessages({ limit: 10 });
+                for (const msg of messages) {
+                    await this.saveMessageToDb(sessionName, msg);
+                }
+                await sleep(500); // Sistemi yormamak için bekle
+            }
+            console.log(`[${sessionName}] Hızlı senkronizasyon tamamlandı.`);
+        } catch (e) {
+            console.error('Sync Hatası:', e.message);
+        }
+    }
+
+    // --- DİĞER API FONKSİYONLARI (Aynı Kalabilir) ---
     async listChats(sessionName) {
         const client = this.sessions.get(sessionName);
-        
-        // 1. WhatsApp Bağlıysa
         if (client) {
             try {
                 const chats = await client.getChats();
@@ -163,19 +229,10 @@ class WhatsappManager {
                 }));
             } catch (e) {}
         }
-
-        // 2. Offline Mod (DB'den)
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
         if (!session) return [];
-
-        const { data: contacts } = await supabase
-            .from('contacts')
-            .select('*')
-            .eq('session_id', session.id)
-            .order('updated_at', { ascending: false });
-
+        const { data: contacts } = await supabase.from('contacts').select('*').eq('session_id', session.id).order('updated_at', { ascending: false });
         if (!contacts) return [];
-
         return contacts.map(c => ({
             id: c.phone_number + '@c.us',
             phone_number: c.phone_number,
@@ -209,20 +266,13 @@ class WhatsappManager {
             try {
                 const chatId = `${contactNumber}@c.us`;
                 const chat = await client.getChatById(chatId);
-                const fetchedMessages = await chat.fetchMessages({ limit: 30 });
+                const fetchedMessages = await chat.fetchMessages({ limit: 20 });
                 for (const msg of fetchedMessages) { await this.saveMessageToDb(sessionName, msg); }
                 
-                const { data: refreshed } = await supabase.from('messages')
-                    .select('*')
-                    .eq('session_id', session.id)
-                    .eq('contact_id', contactNumber)
-                    .order('timestamp', { ascending: false })
-                    .limit(limit);
-                    
+                const { data: refreshed } = await supabase.from('messages').select('*').eq('session_id', session.id).eq('contact_id', contactNumber).order('timestamp', { ascending: false }).limit(limit);
                 return { messages: refreshed ? refreshed.reverse() : [] };
             } catch (e) {}
         }
-
         return { messages: dbMessages ? dbMessages.reverse() : [] };
     }
 
