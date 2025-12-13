@@ -19,7 +19,6 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Medya Klasörü
 const mediaPath = path.join(__dirname, 'public/media');
 if (!fs.existsSync(mediaPath)){
     fs.mkdirSync(mediaPath, { recursive: true });
@@ -32,13 +31,31 @@ whatsappManager.setSocketIO(io);
 
 app.post('/start-session', async (req, res) => {
     const { sessionName, userId } = req.body;
-    if (!sessionName) return res.status(400).json({ error: 'Session ismi gerekli' });
     try {
         await whatsappManager.startSession(sessionName, userId);
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// YENİ: WhatsApp'tan Ham Liste Çek (Seçim Modalı İçin)
+app.get('/whatsapp-chats', async (req, res) => {
+    const { sessionName } = req.query;
+    try {
+        const chats = await whatsappManager.getRawChats(sessionName);
+        res.json({ success: true, chats });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+// YENİ: Seçili Sohbetleri İçe Aktar (Bulk Sync)
+app.post('/sync-chats', async (req, res) => {
+    const { sessionName, contactIds } = req.body;
+    try {
+        const result = await whatsappManager.syncSelectedChats(sessionName, contactIds);
+        res.json({ success: true, ...result });
+    } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+// Kayıtlı (DB) Sohbetleri Getir
 app.get('/session-chats', async (req, res) => {
     const { sessionName } = req.query;
     try {
@@ -76,44 +93,31 @@ app.post('/update-contact', async (req, res) => {
     try {
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionId).single();
         if (!session) return res.status(404).json({ error: 'Oturum bulunamadı' });
-
         const { error } = await supabase.from('contacts').update(updates).eq('session_id', session.id).eq('phone_number', contactId);
         if (error) throw error;
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// --- YENİ EKLENEN: HIZLI YANITLAR (QUICK REPLIES) ---
-
-// 7. Şablonları Getir
 app.get('/quick-replies', async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('quick_replies')
-            .select('*')
-            .order('created_at', { ascending: false });
-        
-        if (error) throw error;
+        const { data } = await supabase.from('quick_replies').select('*').order('created_at', { ascending: false });
         res.json({ success: true, data });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 8. Şablon Ekle
 app.post('/quick-replies', async (req, res) => {
     const { title, message } = req.body;
     try {
-        const { error } = await supabase.from('quick_replies').insert([{ title, message }]);
-        if (error) throw error;
+        await supabase.from('quick_replies').insert([{ title, message }]);
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 9. Şablon Sil
 app.post('/delete-quick-reply', async (req, res) => {
     const { id } = req.body;
     try {
-        const { error } = await supabase.from('quick_replies').delete().eq('id', id);
-        if (error) throw error;
+        await supabase.from('quick_replies').delete().eq('id', id);
         res.json({ success: true });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });

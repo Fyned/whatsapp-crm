@@ -14,14 +14,14 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
   useEffect(() => {
     if (!session) return;
     fetchChats();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.session_name]);
+  }, [session]);
 
   const fetchChats = async () => {
     setLoading(true);
     try {
+      // DİKKAT: Burada veritabanını değil, doğrudan WhatsApp'ı sorguluyoruz
       const res = await fetch(
-        `${API_URL}/session-chats?sessionName=${encodeURIComponent(session.session_name)}`
+        `${API_URL}/whatsapp-chats?sessionName=${encodeURIComponent(session.session_name)}`
       );
       const data = await res.json();
       
@@ -60,31 +60,30 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
         body: JSON.stringify({
           sessionName: session.session_name,
           contactIds: Array.from(selected), 
-          perChatLimit: 20
         }),
       });
       
       const data = await res.json();
       if (data.success) {
         alert(
-          `İşlem Tamamlandı!\nİşlenen Sohbet: ${data.processedChats}\nToplam Mesaj: ${data.totalMessages}`
+          `İşlem Başarılı! ${data.processed} sohbet içeri aktarıldı.`
         );
-        if (onImported) onImported();
+        if (onImported) onImported(); // Listeyi yenile
         onClose();
       } else {
         alert('Import hatası: ' + data.error);
       }
     } catch (err) {
       console.error(err);
-      alert('Sunucu hatası: sohbetler içe aktarılamadı.');
+      alert('Sunucu hatası.');
     } finally {
       setImporting(false);
     }
   };
 
   const filteredChats = chats.filter((c) => {
-    const name = (c.push_name || c.phone_number || '').toLowerCase();
-    const phone = (c.phone_number || '').toLowerCase();
+    const name = (c.name || c.phone || '').toLowerCase();
+    const phone = (c.phone || '').toLowerCase();
     const term = searchTerm.toLowerCase();
     return name.includes(term) || phone.includes(term);
   });
@@ -128,7 +127,7 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
             </div>
           ) : filteredChats.length === 0 ? (
             <div className="p-10 text-center text-gray-400 text-sm">
-              Görüntülenecek sohbet bulunamadı.
+              Sohbet bulunamadı.
             </div>
           ) : (
             filteredChats.map((chat) => {
@@ -149,10 +148,10 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="font-semibold text-gray-800 truncate">
-                        {chat.push_name || chat.phone_number}
+                        {chat.name}
                     </div>
                     <div className="text-[11px] text-gray-500 truncate font-mono">
-                      {chat.phone_number}
+                      {chat.phone}
                     </div>
                   </div>
                   {chat.unread > 0 && (
@@ -184,7 +183,7 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
               className="px-6 py-2 rounded-lg bg-green-600 text-white font-bold text-xs hover:bg-green-700 disabled:opacity-50 flex items-center gap-2 transition shadow-lg shadow-green-200"
             >
               {importing && <RefreshCw className="animate-spin" size={14}/>}
-              {importing ? 'Aktarılıyor...' : 'Aktarımı Başlat'}
+              {importing ? 'İşleniyor...' : 'Seçilenleri Arşivle'}
             </button>
           </div>
         </div>
