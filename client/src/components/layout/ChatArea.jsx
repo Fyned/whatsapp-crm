@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
-import { Send, DownloadCloud, CheckCheck, Loader2, File, Image } from 'lucide-react';
+import { Send, DownloadCloud, CheckCheck, Zap } from 'lucide-react';
+import QuickRepliesModal from './QuickRepliesModal';
 
 // DİNAMİK URL
 const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
@@ -10,6 +11,7 @@ export default function ChatArea({ activeSession, activeContact }) {
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true); 
+  const [isQuickReplyOpen, setIsQuickReplyOpen] = useState(false); // Yeni State
   
   const chatContainerRef = useRef(null); 
   const messagesEndRef = useRef(null);   
@@ -88,7 +90,7 @@ export default function ChatArea({ activeSession, activeContact }) {
   };
 
   const sendMessage = async (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (!newMessage.trim()) return;
     const text = newMessage;
     setNewMessage('');
@@ -106,41 +108,17 @@ export default function ChatArea({ activeSession, activeContact }) {
     } catch (error) { alert('Hata'); }
   };
 
-  // --- MEDYA RENDER FONKSİYONU ---
-  const renderMessageContent = (msg) => {
-    // 1. Resim (Image)
-    if (msg.type === 'image' && msg.media_url) {
-        return (
-            <div className="mb-1">
-                <img 
-                    src={`${API_URL}${msg.media_url}`} 
-                    alt="Gelen Resim" 
-                    className="rounded-lg max-w-full h-auto object-cover max-h-60 cursor-pointer hover:opacity-90 border border-gray-200"
-                    onClick={() => window.open(`${API_URL}${msg.media_url}`, '_blank')}
-                />
-                {msg.body && <p className="mt-1 text-sm">{msg.body}</p>}
-            </div>
-        );
-    }
-    // 2. Ses, Video vb. (Şimdilik Dosya Linki)
-    if ((msg.type === 'video' || msg.type === 'document' || msg.type === 'audio') && msg.media_url) {
-        return (
-            <div className="flex items-center gap-2 bg-gray-100 p-2 rounded mb-1 border border-gray-200">
-                <File size={20} className="text-gray-500" />
-                <a href={`${API_URL}${msg.media_url}`} target="_blank" rel="noreferrer" className="text-blue-600 underline text-xs break-all">
-                    Dosyayı Görüntüle ({msg.type})
-                </a>
-            </div>
-        );
-    }
-    // 3. Normal Metin
-    return <p className="text-gray-800 break-all whitespace-pre-wrap leading-relaxed">{msg.body}</p>;
+  // Şablon seçilince inputa ekle
+  const handleTemplateSelect = (text) => {
+    setNewMessage(text);
+    setIsQuickReplyOpen(false);
   };
 
   if (!activeContact) return <div className="flex-1 bg-[#efeae2] flex items-center justify-center text-gray-500">Sohbet seçiniz</div>;
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#efeae2]">
+      {/* Header */}
       <div className="bg-gray-100 border-b p-3 flex justify-between items-center shadow-sm z-10">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-gray-300 rounded-full flex justify-center items-center font-bold text-gray-600">
@@ -160,8 +138,12 @@ export default function ChatArea({ activeSession, activeContact }) {
           <div key={msg.id} className={`flex ${msg.is_outbound ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[75%] p-2 px-3 rounded-lg shadow-sm text-sm relative ${msg.is_outbound ? 'bg-[#d9fdd3] rounded-tr-none' : 'bg-white rounded-tl-none'}`}>
               
-              {renderMessageContent(msg)}
+              {/* Medya Gösterimi (Basit) */}
+              {msg.type === 'image' && msg.media_url ? (
+                 <img src={`${API_URL}${msg.media_url}`} className="max-w-full rounded-lg mb-1" />
+              ) : null}
 
+              <p className="text-gray-800 break-all whitespace-pre-wrap leading-relaxed">{msg.body}</p>
               <div className="flex justify-end items-center gap-1 mt-1 select-none">
                 <span className="text-[10px] text-gray-500">
                   {new Date(msg.timestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
@@ -174,12 +156,29 @@ export default function ChatArea({ activeSession, activeContact }) {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="bg-gray-100 p-3">
-        <form onSubmit={sendMessage} className="flex gap-2 items-center">
+      <div className="bg-gray-100 p-3 flex gap-2 items-center">
+        {/* Hızlı Yanıt Butonu */}
+        <button 
+            onClick={() => setIsQuickReplyOpen(true)}
+            className="p-3 bg-white text-yellow-600 rounded-full hover:bg-yellow-50 border border-gray-200 transition shadow-sm"
+            title="Hızlı Yanıtlar"
+        >
+            <Zap size={20} fill="currentColor" />
+        </button>
+
+        <form onSubmit={sendMessage} className="flex-1 flex gap-2 items-center">
           <input className="flex-1 p-3 rounded-lg border focus:border-green-500 bg-white" placeholder="Mesaj..." value={newMessage} onChange={e => setNewMessage(e.target.value)} />
           <button className="p-3 bg-green-600 text-white rounded-full"><Send size={20}/></button>
         </form>
       </div>
+
+      {/* Şablon Modalı */}
+      {isQuickReplyOpen && (
+        <QuickRepliesModal 
+            onClose={() => setIsQuickReplyOpen(false)}
+            onSelect={handleTemplateSelect}
+        />
+      )}
     </div>
   );
 }
