@@ -4,7 +4,7 @@ import { LogOut, Plus, MessageSquare, Phone, Trash2, RefreshCw, Loader2, QrCode 
 
 const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
 
-export default function Sidebar({ onSelectSession, activeSessionId, onAddNew, onShowQR }) { // onShowQR eklendi
+export default function Sidebar({ onSelectSession, activeSessionId, onAddNew, onShowQR }) {
   const [sessions, setSessions] = useState([]);
 
   useEffect(() => {
@@ -68,7 +68,8 @@ export default function Sidebar({ onSelectSession, activeSessionId, onAddNew, on
           return (
             <div
               key={session.id}
-              onClick={() => !isQR && onSelectSession(session)} // QR modundaysa tıklama seçmesin
+              /* DÜZELTME: !isQR kontrolü kaldırıldı. Her zaman tıklanabilir. */
+              onClick={() => onSelectSession(session)} 
               className={`group relative w-full flex items-center gap-3 p-3 rounded-xl transition cursor-pointer border border-transparent
                 ${activeSessionId === session.id ? 'bg-gray-800 border-gray-700 text-white shadow-lg' : 'hover:bg-gray-800/50 text-gray-400 hover:text-gray-200'}
               `}
@@ -80,7 +81,6 @@ export default function Sidebar({ onSelectSession, activeSessionId, onAddNew, on
               </div>
               
               <div className="flex gap-1 items-center">
-                {/* QR GÖSTER BUTONU */}
                 {isQR && (
                     <button 
                         onClick={(e) => { e.stopPropagation(); onShowQR(session.session_name); }}
