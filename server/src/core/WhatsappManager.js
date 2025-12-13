@@ -1,238 +1,242 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
-const qrcodeTerminal = require('qrcode-terminal');
-const supabase = require('../config/supabase'); 
+const supabase = require('../db'); // db.js bağlantısı
 
-// Yardımcı: Sadece rakamları döndür
-const formatId = (id) => {
-    if (!id) return null;
-    return id.toString().replace(/\D/g, '');
-};
-
-// Yardımcı: Gecikme
+// Yardımcı: Gecikme fonksiyonu
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Yardımcı: ID'den sadece rakamları al (905551234567)
+const cleanPhone = (id) => id ? id.replace(/\D/g, '') : null;
 
 class WhatsappManager {
     constructor() {
         this.io = null;
-        this.sessions = new Map(); 
+        this.sessions = new Map();
+        // Sunucu yeniden başladığında eski bağlı oturumları otomatik geri yükle
+        this.restoreSessions(); 
     }
 
     setSocketIO(io) {
         this.io = io;
     }
 
-    async getSessionRecord(sessionName) {
-        const { data, error } = await supabase
-            .from('sessions')
-            .select('id')
-            .eq('session_name', sessionName)
-            .maybeSingle();
-
-        if (error) {
-            console.error(`[${sessionName}] Supabase sorgu hatası:`, error.message);
-            return null;
+    async restoreSessions() {
+        // Status'u CONNECTED olanları bul ve tekrar başlat
+        const { data: sessions } = await supabase.from('sessions').select('*').eq('status', 'CONNECTED');
+        if (sessions && sessions.length > 0) {
+            console.log(`🔄 ${sessions.length} aktif oturum geri yükleniyor...`);
+            for (const s of sessions) {
+                // isRestoring = true parametresiyle başlat
+                this.startSession(s.session_name, s.user_id, true);
+            }
         }
-        return data || null;
     }
 
-    // --- ÖNEMLİ DEĞİŞİKLİK: QR KODU RETURN ETMEK İÇİN PROMISE YAPISI ---
-    async startSession(sessionName) {
-        return new Promise(async (resolve, reject) => {
-            console.log(`[${sessionName}] Başlatılıyor...`);
+    async startSession(sessionName, userId = null, isRestoring = false) {
+        if (this.sessions.has(sessionName)) return;
 
-            if (this.sessions.has(sessionName)) {
-                // Zaten varsa eskiyi kapat
-                const existing = this.sessions.get(sessionName);
-                try { await existing.destroy(); } catch (e) {}
-                this.sessions.delete(sessionName);
-            }
+        console.log(`[${sessionName}] Başlatılıyor...`);
+        
+        // İlk kez başlıyorsa DB'ye kayıt at
+        if (!isRestoring) {
+            await supabase.from('sessions').upsert({
+                session_name: sessionName,
+                user_id: userId,
+                status: 'INITIALIZING'
+            }, { onConflict: 'session_name' });
+        }
 
-            const cleanClientId = sessionName.replace(/[^a-zA-Z0-9_-]/g, '_');
-
-            const client = new Client({
-                authStrategy: new LocalAuth({ clientId: cleanClientId }),
-                puppeteer: {
-                    headless: true,
-                    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-                },
-            });
-
-            // Zaman aşımı (30 saniye içinde QR gelmezse iptal et)
-            const qrTimeout = setTimeout(() => {
-                if(!this.sessions.has(sessionName)) {
-                    console.log(`[${sessionName}] QR Zaman aşımı.`);
-                    // reject("QR Oluşturulamadı (Zaman Aşımı)"); // İsteğe bağlı
-                }
-            }, 30000);
-
-            // 1. QR KOD GELDİĞİNDE
-            client.on('qr', async (qr) => {
-                clearTimeout(qrTimeout); // Zamanlayıcıyı durdur
-                console.log(`[${sessionName}] QR Oluştu.`);
-                qrcodeTerminal.generate(qr, { small: true });
-
-                try {
-                    const qrImage = await qrcode.toDataURL(qr);
-                    
-                    // A) Socket ile gönder (Realtime)
-                    if (this.io) {
-                        this.io.emit('qr_code', { sessionId: sessionName, qr: qrImage, image: qrImage });
-                    }
-                    
-                    // B) Veritabanına kaydet
-                    await this.updateSession(sessionName, { qr_code: qrImage, status: 'QR_BEKLEMEDE' });
-
-                    // C) API'ye geri dön (Kesin Çözüm Parçası)
-                    resolve({ qr: qrImage });
-
-                } catch (err) {
-                    console.error(`[${sessionName}] QR işleme hatası:`, err.message);
-                    reject(err);
-                }
-            });
-
-            // 2. BAĞLANTI HAZIR
-            client.on('ready', async () => {
-                clearTimeout(qrTimeout);
-                console.log(`[${sessionName}] HAZIR!`);
-                if (this.io) this.io.emit('session_status', { sessionId: sessionName, status: 'READY' });
-                await this.updateSession(sessionName, { status: 'CONNECTED', qr_code: null });
-                
-                // Eğer QR beklenmeden direkt bağlandıysa (eski oturum)
-                resolve({ status: 'CONNECTED' }); 
-            });
-
-            // ... Diğer olaylar (Message, Disconnect vb.) ...
-            client.on('authenticated', async () => {
-                await this.updateSession(sessionName, { status: 'AUTHENTICATED' });
-            });
-
-            client.on('disconnected', async (reason) => {
-                console.log(`[${sessionName}] Koptu:`, reason);
-                if (this.io) this.io.emit('session_status', { sessionId: sessionName, status: 'DISCONNECTED' });
-                await this.updateSession(sessionName, { status: 'DISCONNECTED' });
-                try { await client.destroy(); } catch(e) {}
-                this.sessions.delete(sessionName);
-            });
-
-            client.on('message_create', (msg) => {
-                this.handleMessageCreate(sessionName, msg).catch(err => console.error(err));
-            });
-
-            try {
-                await client.initialize();
-                this.sessions.set(sessionName, client);
-            } catch (error) {
-                console.error(`[${sessionName}] Başlatma hatası:`, error.message);
-                reject(error);
+        const client = new Client({
+            authStrategy: new LocalAuth({ clientId: sessionName }),
+            puppeteer: {
+                headless: true,
+                args: [
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ]
             }
         });
-    }
 
-    // ... handleMessageCreate, upsertContact, loadHistory, listChats, syncChats, sendMessage, updateSession ...
-    // (Bu fonksiyonlar önceki kodundaki gibi kalabilir, değişmedi)
-    // KODUN ÇOK UZAMAMASI İÇİN BU KISIMLARI ÖNCEKİ KODUN AYNISI OLARAK KORU LÜTFEN.
-    // SADECE 'startSession' METODUNU VE BAŞLANGIÇTAKİ import/helper KISIMLARINI YUKARIDAKİ GİBİ GÜNCELLEMEN YETERLİ.
-    
-    // --- NOT: Tam dosya bütünlüğü için aşağıdaki fonksiyonları da ekliyorum ---
-    
-    async handleMessageCreate(sessionName, msg) {
-        if (msg.from === 'status@broadcast') return;
-        const sessionRecord = await this.getSessionRecord(sessionName);
-        if (!sessionRecord) return;
-        const chat = await msg.getChat();
-        const contact = await chat.getContact();
-        const cleanContactId = formatId(chat.id._serialized);
-        if (!cleanContactId) return;
-        const direction = msg.fromMe ? 'outbound' : 'inbound';
-        console.log(`[MSG] ${cleanContactId}: Yeni mesaj.`);
-        await this.upsertContact(sessionRecord.id, cleanContactId, contact);
-        const { error } = await supabase.from('messages').upsert([{
-            contact_id: cleanContactId,
-            session_id: sessionRecord.id,
-            whatsapp_id: msg.id.id,
-            body: msg.body,
-            direction,
-            timestamp: msg.timestamp,
-        }], { onConflict: 'whatsapp_id' });
-        if (error) console.error('Mesaj kayıt hatası:', error.message);
-    }
+        // 1. QR Kod Olayı
+        client.on('qr', async (qr) => {
+            console.log(`[${sessionName}] QR Kodu Üretildi.`);
+            try {
+                const qrImage = await qrcode.toDataURL(qr);
+                
+                // Frontend'e gönder
+                if (this.io) this.io.emit('qr', qrImage);
+                
+                // Veritabanına yaz (Yedek olarak)
+                await supabase.from('sessions')
+                    .update({ qr_code: qrImage, status: 'QR_READY' })
+                    .eq('session_name', sessionName);
+            } catch (e) { console.error('QR Error:', e); }
+        });
 
-    async upsertContact(sessionDbId, cleanContactId, contact) {
+        // 2. Bağlantı Hazır
+        client.on('ready', async () => {
+            console.log(`[${sessionName}] ✅ BAĞLANDI ve HAZIR!`);
+            if (this.io) this.io.emit('ready', { sessionName });
+            
+            await supabase.from('sessions')
+                .update({ status: 'CONNECTED', qr_code: null })
+                .eq('session_name', sessionName);
+        });
+
+        // 3. Mesaj Yakalama (Canlı Arşiv)
+        client.on('message_create', async (msg) => {
+            // Durum güncellemelerini (Status) kaydetme
+            if (msg.from === 'status@broadcast') return;
+            await this.saveMessageToDb(sessionName, msg);
+        });
+
+        // 4. Bağlantı Koptu
+        client.on('disconnected', async (reason) => {
+            console.log(`[${sessionName}] Bağlantı koptu:`, reason);
+            await supabase.from('sessions').update({ status: 'DISCONNECTED' }).eq('session_name', sessionName);
+            // Client'ı bellekten silme işlemini hemen yapma, yeniden bağlanmayı deneyebilir.
+            // Ama biz şimdilik temizliyoruz:
+            this.sessions.delete(sessionName);
+        });
+
         try {
-            await supabase.from('contacts').upsert([{
-                id: cleanContactId,
-                session_id: sessionDbId,
-                phone_number: contact.number || cleanContactId,
-                push_name: contact.pushname || contact.name || null,
-            }], { onConflict: 'id' });
-        } catch (err) { console.error('Kişi kayıt hatası:', err.message); }
+            await client.initialize();
+            this.sessions.set(sessionName, client);
+        } catch (err) {
+            console.error(`[${sessionName}] Başlatma hatası:`, err.message);
+        }
     }
 
-    async loadHistory(sessionName, targetNumber, totalLimit = 20) {
-        const client = this.sessions.get(sessionName);
-        if (!client) throw new Error('Oturum aktif değil');
-        const sessionRecord = await this.getSessionRecord(sessionName);
-        let chatId = targetNumber.replace(/\D/g, '');
-        if (!chatId.includes('@')) chatId = `${chatId}@c.us`;
-        const chat = await client.getChatById(chatId);
-        const messages = await chat.fetchMessages({ limit: totalLimit || 10 });
-        const cleanContactId = formatId(chat.id._serialized);
-        await this.upsertContact(sessionRecord.id, cleanContactId, await chat.getContact());
-        if (!messages.length) return { count: 0 };
-        const rows = messages.map(msg => ({
-            contact_id: cleanContactId,
-            session_id: sessionRecord.id,
-            whatsapp_id: msg.id.id,
-            body: msg.body,
-            direction: msg.fromMe ? 'outbound' : 'inbound',
-            timestamp: msg.timestamp,
-        }));
-        await supabase.from('messages').upsert(rows, { onConflict: 'whatsapp_id' });
-        return { count: rows.length };
+    // --- VERİTABANI KAYIT MANTIĞI ---
+
+    async saveMessageToDb(sessionName, msg) {
+        try {
+            // Session ID'yi al
+            const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
+            if (!session) return;
+
+            const isOutbound = msg.fromMe;
+            // Eğer mesajı biz attıysak alıcı (to), karşı taraf attıysa gönderen (from) bizim için 'contact'tır.
+            const rawContactId = isOutbound ? msg.to : msg.from;
+            const contactPhone = cleanPhone(rawContactId);
+            
+            // Grup mesajlarını şimdilik atla
+            if (rawContactId.includes('@g.us')) return;
+
+            // 1. Önce Kişiyi (Contact) oluştur veya güncelle
+            // Mesajda isim varsa al, yoksa numarayı isim yap
+            const contactName = msg._data?.notifyName || msg._data?.pushname || contactPhone;
+            
+            await supabase.from('contacts').upsert({
+                session_id: session.id,
+                phone_number: contactPhone,
+                push_name: contactName,
+                updated_at: new Date()
+            }, { onConflict: 'session_id, phone_number' });
+
+            // 2. Mesajı Kaydet
+            const messageData = {
+                session_id: session.id,
+                contact_id: contactPhone, // Frontend bu alanı kullanıyor
+                whatsapp_id: msg.id._serialized,
+                body: msg.body,
+                type: msg.type,
+                is_outbound: isOutbound,
+                timestamp: msg.timestamp,
+                created_at: new Date(msg.timestamp * 1000)
+            };
+
+            const { error } = await supabase.from('messages').upsert(messageData, { onConflict: 'whatsapp_id' });
+            
+            if (error) console.error('Mesaj DB Hatası:', error.message);
+            // else console.log(`[${sessionName}] Mesaj kaydedildi.`);
+
+        } catch (err) {
+            console.error('Save Msg Error:', err);
+        }
     }
+
+    // --- API İŞLEMLERİ ---
 
     async listChats(sessionName) {
         const client = this.sessions.get(sessionName);
-        if (!client) throw new Error('Oturum aktif değil');
+        if (!client) return [];
+        
         const chats = await client.getChats();
-        const privateChats = chats.filter(c => !c.isGroup).slice(0, 100);
-        const result = [];
-        for (const chat of privateChats) {
-            const cleanId = formatId(chat.id._serialized);
-            if(!cleanId) continue;
-            const contact = await chat.getContact();
-            result.push({
-                id: cleanId,
-                phone_number: contact.number,
-                push_name: contact.pushname || contact.name,
-                last_activity: chat.timestamp,
-                unread: chat.unreadCount
-            });
-            await sleep(20);
+        // Sadece grupları değil, bireysel sohbetleri filtrele
+        return chats
+            .filter(c => !c.isGroup)
+            .map(c => ({
+                id: c.id._serialized,
+                phone_number: c.id.user,
+                push_name: c.name || c.id.user,
+                unread: c.unreadCount,
+                timestamp: c.timestamp
+            }));
+    }
+
+    async loadHistory(sessionName, contactNumber, limit = 20, beforeId = null) {
+        const client = this.sessions.get(sessionName);
+        const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
+        
+        if (!session) throw new Error('Session veritabanında bulunamadı');
+
+        // A. Önce Veritabanından Çek
+        let query = supabase.from('messages')
+            .select('*')
+            .eq('session_id', session.id)
+            .eq('contact_id', contactNumber)
+            .order('timestamp', { ascending: false }) // En yeniler en üstte
+            .limit(limit);
+
+        const { data: dbMessages } = await query;
+
+        // B. Veritabanı boşsa veya yetersizse WhatsApp'tan çekip doldur
+        if ((!dbMessages || dbMessages.length < 5) && client) {
+            try {
+                const chatId = `${contactNumber}@c.us`;
+                const chat = await client.getChatById(chatId);
+                const fetchedMessages = await chat.fetchMessages({ limit: 50 }); // Geçmişten 50 mesaj al
+                
+                // Hepsini kaydet
+                for (const msg of fetchedMessages) {
+                    await this.saveMessageToDb(sessionName, msg);
+                }
+                
+                // DB'den tekrar çek (En temiz yöntem)
+                const { data: refreshedData } = await query;
+                return { messages: refreshedData ? refreshedData.reverse() : [] };
+            } catch (e) {
+                console.log("WhatsApp geçmiş çekme hatası (Normal olabilir):", e.message);
+            }
         }
-        return result.sort((a,b) => b.last_activity - a.last_activity);
+
+        // Frontend'de eskiden yeniye göstermek için reverse yapıyoruz
+        return { messages: dbMessages ? dbMessages.reverse() : [] };
     }
 
-    async syncChats(sessionName, contactIds = [], perChatLimit = 10, perChatDelayMs = 400) {
+    async sendMessage(sessionName, targetNumber, text) {
         const client = this.sessions.get(sessionName);
-        if (!client) throw new Error('Oturum aktif değil');
-        // ... (Mevcut sync mantığın aynen kalabilir) ...
-        return { processedChats: contactIds.length, totalMessages: 0 }; // Basitleştirildi, detay eklenebilir.
+        if (!client) throw new Error('Oturum bağlı değil');
+        
+        const chatId = targetNumber.includes('@') ? targetNumber : `${targetNumber}@c.us`;
+        const msg = await client.sendMessage(chatId, text);
+        
+        // Gönderdiğimiz mesajı da veritabanına kaydedelim
+        await this.saveMessageToDb(sessionName, msg);
     }
 
-    async sendMessage(sessionName, targetNumber, content) {
+    async deleteSession(sessionName) {
         const client = this.sessions.get(sessionName);
-        if (!client) throw new Error('Oturum yok');
-        let chatId = targetNumber.replace(/\D/g, '');
-        if (!chatId.includes('@')) chatId = `${chatId}@c.us`;
-        await client.sendMessage(chatId, content);
-    }
-
-    async updateSession(sessionName, data) {
-        try { await supabase.from('sessions').update(data).eq('session_name', sessionName); }
-        catch (e) { console.error(e); }
+        if (client) {
+            try { await client.logout(); } catch(e){}
+            try { await client.destroy(); } catch(e){}
+            this.sessions.delete(sessionName);
+        }
+        // DB'den sil (Cascade ile mesajlar da silinir)
+        await supabase.from('sessions').delete().eq('session_name', sessionName);
     }
 }
 
