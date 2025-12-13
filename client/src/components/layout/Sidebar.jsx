@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
-import { LogOut, Plus, MessageSquare, Phone, Trash2 } from 'lucide-react';
+import { LogOut, Plus, MessageSquare, Phone, Trash2, RefreshCw, Loader2, QrCode } from 'lucide-react';
 
-// DİNAMİK URL EKLENDİ
+// DİNAMİK URL
 const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
 
 export default function Sidebar({
@@ -28,15 +28,14 @@ export default function Sidebar({
   }, []);
 
   const fetchSessions = async () => {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
+    // DEĞİŞİKLİK BURADA: '.in(...)' filtresini kaldırdık. 
+    // Kullanıcının tüm oturumlarını getiriyoruz.
     const { data, error } = await supabase
       .from('sessions')
       .select('*')
-      .in('status', ['CONNECTED', 'DISCONNECTED'])
       .eq('user_id', user.id)
       .order('created_at', { ascending: true });
 
@@ -50,15 +49,9 @@ export default function Sidebar({
 
   const handleDelete = async (e, sessionName) => {
     e.stopPropagation();
-    if (
-      !window.confirm(
-        `${sessionName} hattını silmek istediğinize emin misiniz?`
-      )
-    )
-      return;
+    if (!window.confirm(`${sessionName} hattını ve TÜM verilerini silmek istediğinize emin misiniz?`)) return;
 
     try {
-      // DİNAMİK URL BURADA KULLANILIYOR
       await fetch(`${API_URL}/delete-session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -72,6 +65,17 @@ export default function Sidebar({
   const handleLogout = async () => {
     await supabase.auth.signOut();
     window.location.href = '/login';
+  };
+
+  // Statüye göre renk ve ikon belirleme
+  const getStatusConfig = (status) => {
+    switch (status) {
+        case 'CONNECTED': return { color: 'text-green-500', bg: 'bg-green-500/20', icon: <Phone size={16} />, label: 'Bağlı' };
+        case 'DISCONNECTED': return { color: 'text-red-500', bg: 'bg-red-500/20', icon: <LogOut size={16} />, label: 'Koptu' };
+        case 'QR_READY': return { color: 'text-yellow-500', bg: 'bg-yellow-500/20', icon: <QrCode size={16} />, label: 'QR Bekliyor' };
+        case 'INITIALIZING': return { color: 'text-blue-500', bg: 'bg-blue-500/20', icon: <Loader2 size={16} className="animate-spin" />, label: 'Başlatılıyor...' };
+        default: return { color: 'text-gray-500', bg: 'bg-gray-500/20', icon: <RefreshCw size={16} />, label: status };
+    }
   };
 
   return (
@@ -94,58 +98,50 @@ export default function Sidebar({
 
         {sessions.length === 0 && (
           <div className="text-center py-8 px-4 text-gray-500 text-sm border border-gray-800 border-dashed rounded-xl bg-gray-800/30">
-            Henüz bağlı hat yok.
+            Henüz hat yok.
           </div>
         )}
 
-        {sessions.map((session) => (
-          <div
-            key={session.id}
-            onClick={() => onSelectSession(session)}
-            className={`group relative w-full flex items-center gap-3 p-3 rounded-xl transition cursor-pointer border border-transparent
-              ${
-                activeSessionId === session.id
-                  ? 'bg-gray-800 border-gray-700 text-white shadow-lg'
-                  : 'hover:bg-gray-800/50 text-gray-400 hover:text-gray-200'
-              }
-            `}
-          >
+        {sessions.map((session) => {
+          const config = getStatusConfig(session.status);
+          
+          return (
             <div
-              className={`p-2 rounded-full ${
-                session.status === 'CONNECTED'
-                  ? 'bg-green-500/20 text-green-500'
-                  : 'bg-red-500/20 text-red-500'
-              }`}
+              key={session.id}
+              onClick={() => onSelectSession(session)}
+              className={`group relative w-full flex items-center gap-3 p-3 rounded-xl transition cursor-pointer border border-transparent
+                ${
+                  activeSessionId === session.id
+                    ? 'bg-gray-800 border-gray-700 text-white shadow-lg'
+                    : 'hover:bg-gray-800/50 text-gray-400 hover:text-gray-200'
+                }
+              `}
             >
-              <Phone size={16} />
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <div className="font-medium text-sm truncate">
-                {session.display_name || session.session_name}
+              <div className={`p-2 rounded-full ${config.bg} ${config.color}`}>
+                {config.icon}
               </div>
-              <div
-                className={`text-[10px] font-medium uppercase tracking-wide ${
-                  session.status === 'CONNECTED'
-                    ? 'text-green-500'
-                    : 'text-red-500'
-                }`}
-              >
-                {session.status}
+
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-sm truncate">
+                  {session.display_name || session.session_name}
+                </div>
+                <div className={`text-[10px] font-medium uppercase tracking-wide ${config.color}`}>
+                  {config.label}
+                </div>
+              </div>
+
+              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
+                <button
+                  onClick={(e) => handleDelete(e, session.session_name)}
+                  className="p-1.5 hover:bg-red-500/20 hover:text-red-500 rounded-md transition"
+                  title="Hattı Tamamen Sil"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
             </div>
-
-            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition">
-              <button
-                onClick={(e) => handleDelete(e, session.session_name)}
-                className="p-1.5 hover:bg-red-500/20 hover:text-red-500 rounded-md transition"
-                title="Hattı Sil"
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
         <button
           onClick={onAddNew}
