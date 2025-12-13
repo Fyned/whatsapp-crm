@@ -9,13 +9,11 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
-// --- AYARLAR ---
+// --- SUPABASE & SERVER ---
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
-if (!supabaseUrl || !supabaseKey) {
-    console.error('❌ HATA: .env eksik!');
-}
+if (!supabaseUrl || !supabaseKey) console.error('❌ HATA: .env eksik!');
 
 const supabase = createClient(supabaseUrl, supabaseKey, {
     auth: { autoRefreshToken: false, persistSession: false }
@@ -28,17 +26,22 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// GLOBAL DEĞİŞKENLER
+// GLOBAL
 let client = null;
 let lastQR = null;
 let currentSessionData = { sessionName: null, userId: null };
 
-// --- CLIENT ---
+// --- CLIENT SETUP ---
 function initializeClient() {
     console.log('🔄 WhatsApp Başlatılıyor...');
+    
+    // Puppeteer ayarlarını güçlendirdik
     client = new Client({
         authStrategy: new LocalAuth(),
-        puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+        puppeteer: {
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        }
     });
 
     client.on('qr', (qr) => {
@@ -67,21 +70,10 @@ function initializeClient() {
         try {
             const { data: session } = await supabase.from('sessions').select('id').eq('session_name', currentSessionData.sessionName).single();
             if (session) {
-                const contactId = msg.from.replace(/\D/g, '');
-                await supabase.from('messages').insert({
-                    session_id: session.id,
-                    contact_id: contactId,
-                    whatsapp_id: msg.from, // Düzeltme: Unique ID
-                    chat_id: msg.from,
-                    body: msg.body,
-                    sender: msg.fromMe ? 'me' : 'customer',
-                    is_outbound: msg.fromMe,
-                    timestamp: msg.timestamp,
-                    created_at: new Date()
-                });
+                await saveMessagesToDb(session.id, [msg]);
                 io.emit('new-message', { chat_id: msg.from, body: msg.body });
             }
-        } catch (e) { }
+        } catch (e) {}
     });
 
     client.initialize();
@@ -98,7 +90,28 @@ async function updateSessionStatus(status) {
     } catch (e) {}
 }
 
-// --- API ---
+// Mesajları DB'ye kaydeden yardımcı fonksiyon
+async function saveMessagesToDb(sessionId, messages) {
+    if (!messages.length) return;
+    
+    const messagesToInsert = messages.map(msg => ({
+        session_id: sessionId,
+        contact_id: msg.from.replace(/\D/g, '') || msg.to.replace(/\D/g, ''), // Hem gelen hem giden için numara
+        whatsapp_id: msg.id._serialized,
+        chat_id: msg.from, 
+        body: msg.body,
+        sender: msg.fromMe ? 'me' : 'customer',
+        is_outbound: msg.fromMe,
+        timestamp: msg.timestamp,
+        created_at: new Date(msg.timestamp * 1000)
+    }));
+
+    // ID çakışması varsa güncelleme yapma (ignore)
+    const { error } = await supabase.from('messages').upsert(messagesToInsert, { onConflict: 'whatsapp_id' });
+    if (error) console.error('DB Insert Error:', error.message);
+}
+
+// --- API ENDPOINTLERİ ---
 
 app.post('/start-session', async (req, res) => {
     const { sessionName, userId } = req.body;
@@ -110,22 +123,11 @@ app.post('/start-session', async (req, res) => {
     res.json({ success: true });
 });
 
-app.get('/session-chats', async (req, res) => {
-    if (!client || !client.info) return res.status(400).json({ error: 'WhatsApp bağlı değil' });
-    const chats = await client.getChats();
-    res.json({ success: true, chats: chats.map(c => ({
-        id: c.id._serialized, name: c.name, push_name: c.name, phone_number: c.id.user, unread: c.unreadCount
-    }))});
-});
-
-app.post('/sync-chats', async (req, res) => {
-    res.json({ success: true }); // Sync arka planda (Opsiyonel)
-});
-
-// --- DÜZELTİLMİŞ HISTORY ENDPOINT (PAGINATION FIX) ---
+// --- GARANTİLİ GEÇMİŞ İNDİRME ---
 app.post('/fetch-history', async (req, res) => {
     const { sessionName, contactId, limit = 20, beforeId } = req.body;
-    
+    console.log(`📥 Geçmiş İsteği: ${contactId}, Limit: ${limit}, Cursor: ${beforeId || 'Yok'}`);
+
     try {
         // 1. Session ID
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
@@ -136,7 +138,7 @@ app.post('/fetch-history', async (req, res) => {
             .select('*')
             .eq('session_id', session.id)
             .eq('contact_id', contactId)
-            .order('timestamp', { ascending: false })
+            .order('timestamp', { ascending: false }) // En yeni -> En eski
             .limit(limit);
 
         if (beforeId) {
@@ -146,64 +148,41 @@ app.post('/fetch-history', async (req, res) => {
 
         const { data: dbMessages } = await query;
 
-        // 3. Yeterliyse dön
+        // 3. Eğer DB'de yeterli veri varsa, WhatsApp'a gitme
         if (dbMessages && dbMessages.length >= limit) {
+            console.log(`✅ DB'den ${dbMessages.length} mesaj döndü.`);
             return res.json({ success: true, messages: dbMessages.reverse(), source: 'db' });
         }
 
-        // 4. Yetersizse WhatsApp'tan Çek
-        console.log(`📥 Geçmiş İndiriliyor: ${contactId}`);
+        // 4. DB yetersiz, WhatsApp'tan ZORLA çek
         if (!client || !client.info) return res.json({ success: true, messages: dbMessages ? dbMessages.reverse() : [] });
 
-        const whatsappId = contactId.includes('@') ? contactId : `${contactId}@c.us`;
-        const chat = await client.getChatById(whatsappId);
+        const chatId = contactId.includes('@') ? contactId : `${contactId}@c.us`;
+        const chat = await client.getChatById(chatId);
+
+        // KADEMELİ FETCH STRATEJİSİ:
+        // Eğer cursor varsa ama WWebJS bulamıyorsa, "öncekileri" getiremez.
+        // Bu yüzden "son X mesajı" getir diyerek aralığı genişletiyoruz.
+        // Örneğin: Önce 50 çek, yetmediyse 200 çek, yetmediyse 500 çek.
         
-        // --- AKILLI FETCH STRATEJİSİ ---
-        let fetchOptions = { limit: 50 }; // Standart
-
-        if (beforeId) {
-            // Referans mesajı (cursor) cache'te var mı?
-            const cursorMsg = chat.messages.find(m => m.id._serialized === beforeId);
-            
-            if (cursorMsg) {
-                console.log("✅ Cursor mesajı cache'te bulundu, ondan öncesi çekiliyor.");
-                fetchOptions = { limit: limit, before: cursorMsg };
-            } else {
-                console.log("⚠️ Cursor mesajı cache'te yok (Restart sonrası), geniş arama yapılıyor...");
-                // Eğer cursor yoksa, WWebJS "öncekileri" bulamaz. 
-                // Mecburen son 100 mesajı çekip DB'ye basacağız, böylece aradaki boşluk dolar.
-                fetchOptions = { limit: 100 }; 
-            }
-        }
-
-        const waMessages = await chat.fetchMessages(fetchOptions);
+        let fetchCount = 50;
+        if (beforeId) fetchCount = 200; // Eğer geçmişe gidiyorsak daha büyük parça al
         
-        // Gelenleri DB'ye Kaydet
-        const messagesToInsert = waMessages.map(msg => ({
-            session_id: session.id,
-            contact_id: contactId,
-            whatsapp_id: msg.id._serialized,
-            chat_id: msg.from,
-            body: msg.body,
-            sender: msg.fromMe ? 'me' : 'customer',
-            is_outbound: msg.fromMe,
-            timestamp: msg.timestamp,
-            created_at: new Date(msg.timestamp * 1000)
-        }));
+        console.log(`🌍 WhatsApp'tan son ${fetchCount} mesaj çekiliyor...`);
+        const waMessages = await chat.fetchMessages({ limit: fetchCount });
 
-        if (messagesToInsert.length > 0) {
-            await supabase.from('messages').upsert(messagesToInsert, { onConflict: 'whatsapp_id' });
-        }
+        // DB'ye Kaydet
+        await saveMessagesToDb(session.id, waMessages);
 
-        // DB'den tekrar çek (Tutarlılık ve sıralama için)
-        // Bu sefer limit kısıtlamasını biraz gevşetip cursor ile çekelim
+        // Tekrar DB'den Sorgula (Artık veriler DB'de olmalı)
+        // Cursor mantığını koruyarak tekrar sorguluyoruz
         let finalQuery = supabase.from('messages')
             .select('*')
             .eq('session_id', session.id)
             .eq('contact_id', contactId)
             .order('timestamp', { ascending: false })
-            .limit(limit + 10);
-            
+            .limit(limit); // Frontend ne kadar istediyse o kadar dön
+
         if (beforeId) {
              const { data: refMsg2 } = await supabase.from('messages').select('timestamp').eq('whatsapp_id', beforeId).single();
              if (refMsg2) finalQuery = finalQuery.lt('timestamp', refMsg2.timestamp);
@@ -211,10 +190,12 @@ app.post('/fetch-history', async (req, res) => {
 
         const { data: finalMessages } = await finalQuery;
 
+        console.log(`✅ WhatsApp sync sonrası ${finalMessages?.length} mesaj dönüyor.`);
+        
         res.json({ 
             success: true, 
             messages: finalMessages ? finalMessages.reverse() : [],
-            source: 'whatsapp'
+            source: 'whatsapp_sync'
         });
 
     } catch (error) {
@@ -231,6 +212,18 @@ app.post('/send-message', async (req, res) => {
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+app.get('/session-chats', async (req, res) => {
+    try {
+        if (!client) return res.json({ success: false });
+        const chats = await client.getChats();
+        res.json({ success: true, chats: chats.map(c => ({
+            id: c.id._serialized, name: c.name, phone_number: c.id.user, unread: c.unreadCount
+        }))});
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/sync-chats', async(req,res) => res.json({success:true})); // Placeholder
 
 initializeClient();
 
