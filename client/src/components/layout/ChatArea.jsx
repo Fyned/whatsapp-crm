@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
-import { Send, DownloadCloud, CheckCheck } from 'lucide-react';
+import { Send, DownloadCloud, CheckCheck, Loader2 } from 'lucide-react';
 
 // DİNAMİK URL
 const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
@@ -9,18 +9,26 @@ export default function ChatArea({ activeSession, activeContact }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(true); // Daha fazla mesaj var mı?
   
-  const messagesEndRef = useRef(null);
+  // Ref'ler
+  const chatContainerRef = useRef(null); // Scroll edilen ana kutu
+  const messagesEndRef = useRef(null);   // En alt nokta (otomatik kaydırma için)
+  
+  // Scroll pozisyonunu korumak için geçici değişkenler
+  const prevScrollHeightRef = useRef(null);
+  const isLoadingOldRef = useRef(false); // Eski mesaj mı yükleniyor yoksa yeni mi geldi?
 
-  // Aktif kişi veya oturum değiştiğinde mesajları sıfırla ve çek
+  // 1. Aktif kişi değiştiğinde sıfırdan yükle
   useEffect(() => {
     if (activeContact && activeSession) {
       setMessages([]); 
-      fetchMessages();
+      setHasMore(true);
+      fetchMessages(true); // true = İlk yükleme (en alta git)
     }
   }, [activeContact, activeSession]);
 
-  // Realtime Dinleme (Canlı Mesaj Akışı)
+  // 2. Realtime Dinleme (Canlı Mesaj)
   useEffect(() => {
     if (!activeSession || !activeContact) return;
 
@@ -31,25 +39,54 @@ export default function ChatArea({ activeSession, activeContact }) {
           event: 'INSERT', 
           schema: 'public', 
           table: 'messages',
-          filter: `session_id=eq.${activeSession.id}` // Sadece bu oturuma ait mesajlar
+          filter: `session_id=eq.${activeSession.id}` 
         },
         (payload) => {
           // Gelen mesaj şu an açık olan kişiye mi ait?
           if (payload.new.contact_id === activeContact.phone_number) {
+            isLoadingOldRef.current = false; // Yeni mesaj, alta gitmeli
             setMessages((prev) => [...prev, payload.new]);
-            scrollToBottom();
           }
         }
       )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [activeSession, activeContact]);
 
-  const fetchMessages = async () => {
+  // 3. Mesajlar değiştiğinde Scroll Yönetimi (SİHİRLİ KISIM)
+  useLayoutEffect(() => {
+    if (!chatContainerRef.current) return;
+
+    // A) Eğer eski mesajlar yüklendiyse: Scroll'u koru
+    if (isLoadingOldRef.current && prevScrollHeightRef.current) {
+      const newScrollHeight = chatContainerRef.current.scrollHeight;
+      const diff = newScrollHeight - prevScrollHeightRef.current;
+      chatContainerRef.current.scrollTop = diff; // Fark kadar aşağı it
+      isLoadingOldRef.current = false;
+    } 
+    // B) Eğer yeni mesaj geldiyse veya ilk açılışsa: En alta git
+    else {
+      // Sadece en alttaysa veya ilk yüklemedeyse kaydır (Opsiyonel kullanıcı deneyimi)
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' }); 
+    }
+  }, [messages]);
+
+  // --- API FONKSİYONLARI ---
+
+  const fetchMessages = async (isInitialLoad = false) => {
+    if (loading || !hasMore) return;
     setLoading(true);
+
+    // Scroll yüksekliğini kaydet (Eski mesaj yükleniyorsa)
+    if (!isInitialLoad && chatContainerRef.current) {
+      prevScrollHeightRef.current = chatContainerRef.current.scrollHeight;
+      isLoadingOldRef.current = true;
+    }
+
+    // En eski mesajın ID'sini bul (Pagination için referans)
+    const oldestMessageId = !isInitialLoad && messages.length > 0 ? messages[0].whatsapp_id : null;
+
     try {
       const res = await fetch(`${API_URL}/fetch-history`, {
         method: 'POST',
@@ -57,16 +94,25 @@ export default function ChatArea({ activeSession, activeContact }) {
         body: JSON.stringify({
           sessionName: activeSession.session_name,
           contactId: activeContact.phone_number, 
-          limit: 50
+          limit: 20, // Her seferinde 20 mesaj
+          beforeId: oldestMessageId
         }),
       });
+      
       const data = await res.json();
+      
       if (data.success) {
-        setMessages(data.messages);
-        scrollToBottom();
+        if (data.messages.length < 20) setHasMore(false); // Daha az geldiyse bitmiştir
+
+        if (isInitialLoad) {
+          setMessages(data.messages);
+        } else {
+          // Eski mesajları listenin başına ekle
+          setMessages(prev => [...data.messages, ...prev]);
+        }
       }
     } catch (error) {
-      console.error(error);
+      console.error("Geçmiş çekilemedi:", error);
     } finally {
       setLoading(false);
     }
@@ -77,7 +123,8 @@ export default function ChatArea({ activeSession, activeContact }) {
     if (!newMessage.trim()) return;
 
     const text = newMessage;
-    setNewMessage(''); // Inputu hemen temizle
+    setNewMessage('');
+    isLoadingOldRef.current = false; // Yeni mesaj, alta kaymalı
 
     try {
       await fetch(`${API_URL}/send-message`, {
@@ -92,12 +139,6 @@ export default function ChatArea({ activeSession, activeContact }) {
     } catch (error) {
       alert('Mesaj gönderilemedi');
     }
-  };
-
-  const scrollToBottom = () => {
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
   };
 
   if (!activeContact) {
@@ -121,21 +162,35 @@ export default function ChatArea({ activeSession, activeContact }) {
             <div className="text-xs text-gray-500">{activeContact.phone_number}</div>
           </div>
         </div>
-        <button 
-          onClick={fetchMessages} 
-          disabled={loading} 
-          className="text-gray-500 hover:text-green-600 p-2 rounded-full hover:bg-gray-200 transition"
-          title="Geçmişi Yenile"
-        >
-          <DownloadCloud size={20} />
-        </button>
       </div>
 
       {/* Mesaj Alanı */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png')] bg-repeat">
+      <div 
+        ref={chatContainerRef}
+        className="flex-1 overflow-y-auto p-4 space-y-2 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png')] bg-repeat"
+      >
+        {/* Daha Eski Yükle Butonu */}
+        <div className="flex justify-center mb-4">
+          {hasMore ? (
+            <button 
+              onClick={() => fetchMessages(false)} 
+              disabled={loading}
+              className="flex items-center gap-2 bg-white/80 hover:bg-white text-gray-600 px-3 py-1 rounded-full text-xs shadow-sm transition border border-gray-200"
+            >
+              {loading ? <Loader2 className="animate-spin" size={14} /> : <DownloadCloud size={14} />}
+              <span>Daha Eski Mesajlar</span>
+            </button>
+          ) : (
+            <span className="text-[10px] text-gray-400 bg-gray-100 px-2 py-1 rounded-full">
+              Sohbetin başlangıcı
+            </span>
+          )}
+        </div>
+
+        {/* Mesajlar */}
         {messages.map((msg) => (
           <div
-            key={msg.id}
+            key={msg.id} // UUID olduğu için key olarak güvenli
             className={`flex ${msg.is_outbound ? 'justify-end' : 'justify-start'}`}
           >
             <div
@@ -143,7 +198,6 @@ export default function ChatArea({ activeSession, activeContact }) {
                 ${msg.is_outbound ? 'bg-[#d9fdd3] rounded-tr-none' : 'bg-white rounded-tl-none'}
               `}
             >
-              {/* DÜZELTME: break-words yerine break-all kullanıldı */}
               <p className="text-gray-800 break-all whitespace-pre-wrap leading-relaxed">
                 {msg.body}
               </p>
@@ -159,6 +213,7 @@ export default function ChatArea({ activeSession, activeContact }) {
             </div>
           </div>
         ))}
+        {/* Otomatik scroll için görünmez div */}
         <div ref={messagesEndRef} />
       </div>
 
