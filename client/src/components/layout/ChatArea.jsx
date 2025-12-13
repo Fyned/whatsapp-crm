@@ -18,13 +18,13 @@ export default function ChatArea({ activeSession, activeContact }) {
   const prevScrollHeightRef = useRef(null);
   const isLoadingOldRef = useRef(false);
 
-  // Tarih Formatlayıcı
   const formatDate = (timestamp) => {
     return new Date(timestamp * 1000).toLocaleString('tr-TR', {
       day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit'
     });
   };
 
+  // Kişi değişince sıfırla
   useEffect(() => {
     if (activeContact && activeSession) {
       setMessages([]); 
@@ -33,6 +33,7 @@ export default function ChatArea({ activeSession, activeContact }) {
     }
   }, [activeContact, activeSession]);
 
+  // Realtime
   useEffect(() => {
     if (!activeSession || !activeContact) return;
     const channel = supabase.channel('chat_updates')
@@ -52,6 +53,7 @@ export default function ChatArea({ activeSession, activeContact }) {
     return () => { supabase.removeChannel(channel); };
   }, [activeSession, activeContact]);
 
+  // Scroll Koruma
   useLayoutEffect(() => {
     if (!chatContainerRef.current) return;
     if (isLoadingOldRef.current && prevScrollHeightRef.current) {
@@ -66,10 +68,13 @@ export default function ChatArea({ activeSession, activeContact }) {
   const fetchMessages = async (isInitialLoad = false) => {
     if (loading || (!hasMore && !isInitialLoad)) return;
     setLoading(true);
+    
     if (!isInitialLoad && chatContainerRef.current) {
       prevScrollHeightRef.current = chatContainerRef.current.scrollHeight;
       isLoadingOldRef.current = true;
     }
+    
+    // Eğer mesajlar henüz yüklenmediyse oldest ID null olmalı
     const oldestMessageId = !isInitialLoad && messages.length > 0 ? messages[0].whatsapp_id : null;
 
     try {
@@ -84,13 +89,19 @@ export default function ChatArea({ activeSession, activeContact }) {
         }),
       });
       const data = await res.json();
+      
       if (data.success) {
-        if (data.messages.length < 20) setHasMore(false); 
+        const newMsgs = data.messages || [];
+        
+        if (newMsgs.length < 20) setHasMore(false); 
+
         setMessages(prev => {
-            const newMsgs = data.messages;
             if (isInitialLoad) return newMsgs;
+            
+            // Çift mesaj engelleme
             const existingIds = new Set(prev.map(m => m.whatsapp_id));
-            return [...newMsgs.filter(m => !existingIds.has(m.whatsapp_id)), ...prev];
+            const uniqueNew = newMsgs.filter(m => !existingIds.has(m.whatsapp_id));
+            return [...uniqueNew, ...prev];
         });
       }
     } catch (error) { console.error(error); } finally { setLoading(false); }
@@ -120,11 +131,9 @@ export default function ChatArea({ activeSession, activeContact }) {
     setIsQuickReplyOpen(false);
   };
 
-  // --- GELİŞMİŞ MEDYA GÖSTERİMİ ---
   const renderMessageContent = (msg) => {
     const fullMediaUrl = msg.media_url ? `${API_URL}${msg.media_url}` : null;
 
-    // 1. RESİM
     if (msg.type === 'image' && fullMediaUrl) {
         return (
             <div className="mb-1">
@@ -139,19 +148,16 @@ export default function ChatArea({ activeSession, activeContact }) {
         );
     }
 
-    // 2. VİDEO
     if (msg.type === 'video' && fullMediaUrl) {
         return (
             <div className="mb-1">
                 <video controls className="max-w-full rounded-lg max-h-64 border border-gray-200">
                     <source src={fullMediaUrl} type={msg.mimetype} />
-                    Video desteklenmiyor.
                 </video>
             </div>
         );
     }
 
-    // 3. BELGE / SES (PDF, DOCX, MP3 vs.)
     if ((msg.type === 'document' || msg.type === 'audio' || msg.type === 'ptt') && fullMediaUrl) {
         const isAudio = msg.type === 'audio' || msg.type === 'ptt';
         return (
@@ -159,7 +165,6 @@ export default function ChatArea({ activeSession, activeContact }) {
                 onClick={() => window.open(fullMediaUrl, '_blank')}
                 className="flex items-center gap-3 bg-gray-50 p-3 rounded-lg border border-gray-200 mb-1 hover:bg-gray-100 transition cursor-pointer select-none"
             >
-                {/* DÜZELTME BURADA: flex-shrink-0 -> shrink-0 */}
                 <div className={`p-2 rounded-full shrink-0 ${isAudio ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
                     {isAudio ? <Zap size={20} /> : <FileText size={24} />}
                 </div>
@@ -175,7 +180,6 @@ export default function ChatArea({ activeSession, activeContact }) {
         );
     }
 
-    // 4. NORMAL METİN
     return <p className="text-gray-800 break-all whitespace-pre-wrap leading-relaxed">{msg.body}</p>;
   };
 
@@ -193,11 +197,23 @@ export default function ChatArea({ activeSession, activeContact }) {
             <div className="text-xs text-gray-500">{activeContact.phone_number}</div>
           </div>
         </div>
-        <button onClick={() => fetchMessages(false)} disabled={loading} className="p-2 text-gray-500 hover:bg-gray-200 rounded-full"><DownloadCloud size={20}/></button>
+        
+        {/* Butonun Görünürlüğü hasMore'a bağlı değil, her zaman görünür olabilir veya koşullu */}
+        <button 
+            onClick={() => fetchMessages(false)} 
+            disabled={loading || !hasMore} 
+            className={`p-2 rounded-full transition ${!hasMore ? 'text-gray-300 cursor-not-allowed' : 'text-gray-500 hover:text-green-600 hover:bg-gray-200'}`}
+            title="Daha Eski Mesajlar"
+        >
+            <DownloadCloud size={20}/>
+        </button>
       </div>
 
       <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png')] bg-repeat">
-        <div className="flex justify-center mb-4">{!hasMore && <span className="text-[10px] bg-gray-100 px-3 py-1 rounded-full">Sohbet Başı</span>}</div>
+        <div className="flex justify-center mb-4">
+            {!hasMore && <span className="text-[10px] bg-gray-100 px-3 py-1 rounded-full text-gray-500">Sohbet Başı</span>}
+            {hasMore && loading && <Loader2 className="animate-spin text-gray-400" size={16}/>}
+        </div>
         
         {messages.map((msg) => (
           <div key={msg.id} className="flex flex-col">
