@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
-import { X, Search, CheckSquare, Square, RefreshCw, Loader2 } from 'lucide-react';
-import io from 'socket.io-client'; // Socket ekledik
+import { X, Search, CheckSquare, Square, RefreshCw, Loader2, Archive } from 'lucide-react';
+import io from 'socket.io-client';
 
 // DİNAMİK URL
 const API_URL = `${window.location.protocol}//${window.location.hostname}:3006`;
@@ -14,7 +14,7 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
   // Canlı Durum State'leri
   const [importing, setImporting] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
-  const [progress, setProgress] = useState(null);
+  const [progressCount, setProgressCount] = useState(0);
 
   const socketRef = useRef(null);
 
@@ -22,25 +22,20 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
     if (!session) return;
     fetchChats();
 
-    // Socket Bağlantısı
     socketRef.current = io(API_URL, { transports: ['websocket', 'polling'] });
 
-    // 1. Genel Durum
     socketRef.current.on('sync_status', (data) => {
         setStatusMessage(`İşleniyor (${data.current}/${data.total}): ${data.chatName}`);
+        setProgressCount(0); // Yeni sohbete geçince sayacı sıfırla
     });
 
-    // 2. Mesaj Sayacı
     socketRef.current.on('sync_progress', (data) => {
-        setProgress(`${data.count} mesaj arşivlendi...`);
+        setProgressCount(data.count); // Canlı sayı güncellemesi
     });
 
-    // 3. Bitiş
     socketRef.current.on('sync_complete', (data) => {
         setImporting(false);
-        setStatusMessage('');
-        setProgress(null);
-        alert(`İşlem Tamamlandı! Toplam ${data.total} sohbet başarıyla arşivlendi.`);
+        alert(`İşlem Tamamlandı! Seçilen sohbetler başarıyla arşivlendi.`);
         if (onImported) onImported();
         onClose();
     });
@@ -58,11 +53,10 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
       if (data.success) {
         setChats(data.chats || []);
       } else {
-        alert('Sohbetler alınamadı: ' + data.error);
+        alert('Hata: ' + data.error);
       }
     } catch (err) {
-      console.error(err);
-      alert('Hata.');
+      alert('Sunucu hatası.');
     } finally {
       setLoading(false);
     }
@@ -78,10 +72,7 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
   };
 
   const handleImport = async () => {
-    if (selected.size === 0) {
-      alert('En az bir sohbet seçmelisiniz.');
-      return;
-    }
+    if (selected.size === 0) return alert('Seçim yapınız.');
     setImporting(true);
     setStatusMessage('Başlatılıyor...');
     
@@ -94,9 +85,7 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
           contactIds: Array.from(selected), 
         }),
       });
-      // Cevap hemen döner, asıl iş Socket ile takip edilir.
     } catch (err) {
-      console.error(err);
       alert('Sunucu hatası.');
       setImporting(false);
     }
@@ -111,10 +100,30 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col relative overflow-hidden">
+        
+        {/* Yükleme Ekranı (Overlay) */}
+        {importing && (
+             <div className="absolute inset-0 bg-white/95 z-50 flex flex-col items-center justify-center text-center p-8 animate-in fade-in">
+                <div className="bg-green-100 p-4 rounded-full mb-4 animate-pulse">
+                    <Archive className="text-green-600" size={40} />
+                </div>
+                <h3 className="font-bold text-xl text-gray-800 mb-2">{statusMessage}</h3>
+                
+                <div className="text-3xl font-mono font-bold text-green-600 mb-2">
+                    {progressCount}
+                </div>
+                <p className="text-sm text-gray-500 font-medium">mesaj arşivlendi</p>
+
+                <p className="text-xs text-gray-400 mt-8 max-w-xs bg-gray-50 p-3 rounded-lg border border-gray-100">
+                    ⚠️ Spam koruması için insansı hızda işlem yapılıyor. Lütfen pencereyi kapatmayın.
+                </p>
+             </div>
+        )}
+
         <div className="p-4 border-b flex items-center justify-between bg-gray-50">
           <div>
-            <h2 className="font-bold text-gray-800 text-sm">Sohbetleri Seç ve Arşivle</h2>
+            <h2 className="font-bold text-gray-800 text-sm">Arşivlenecek Sohbetleri Seç</h2>
             <p className="text-xs text-gray-500">Hat: {session?.session_name}</p>
           </div>
           <button onClick={onClose}><X className="text-gray-400 hover:text-red-500" size={18} /></button>
@@ -125,7 +134,7 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
             <Search className="absolute left-3 top-2.5 text-gray-400" size={16} />
             <input
               type="text"
-              placeholder="Ara..."
+              placeholder="Sohbet ara..."
               className="w-full pl-9 pr-3 py-2 border rounded-lg text-xs focus:outline-none focus:border-green-500"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
@@ -133,20 +142,12 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto relative">
-          {importing && (
-             <div className="absolute inset-0 bg-white/90 z-10 flex flex-col items-center justify-center text-center p-6">
-                <Loader2 className="animate-spin text-green-600 mb-3" size={40} />
-                <h3 className="font-bold text-gray-800">{statusMessage}</h3>
-                <p className="text-sm text-gray-500 mt-1 font-mono">{progress}</p>
-                <p className="text-xs text-gray-400 mt-4 max-w-xs">
-                    Sohbet geçmişi derinlemesine taranıyor. Bu işlem mesaj sayısına göre zaman alabilir. Lütfen pencereyi kapatmayın.
-                </p>
-             </div>
-          )}
-
+        <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <div className="p-10 text-center text-gray-400 text-sm">Yükleniyor...</div>
+            <div className="p-10 text-center text-gray-400 text-sm flex flex-col items-center gap-2">
+              <Loader2 className="animate-spin" size={24}/>
+              <p>Liste yükleniyor...</p>
+            </div>
           ) : (
             filteredChats.map((chat) => {
               const uniqueId = chat.id; 
@@ -155,7 +156,6 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
                 <button
                   key={uniqueId}
                   onClick={() => toggleSelect(uniqueId)}
-                  disabled={importing}
                   className={`w-full flex items-center gap-3 px-4 py-3 border-b border-gray-100 text-left text-sm transition ${isSelected ? 'bg-green-50' : 'hover:bg-gray-50'}`}
                 >
                   <div className={isSelected ? "text-green-600" : "text-gray-300"}>
@@ -175,9 +175,9 @@ export default function SelectChatsModal({ session, onClose, onImported }) {
         <div className="p-4 border-t bg-gray-50 flex items-center justify-between text-xs">
           <span className="text-gray-600 font-medium">Seçili: <strong className="text-green-600">{selected.size}</strong></span>
           <div className="flex gap-2">
-            <button onClick={onClose} disabled={importing} className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-100">Vazgeç</button>
-            <button onClick={handleImport} disabled={importing || selected.size === 0} className="px-6 py-2 rounded-lg bg-green-600 text-white font-bold hover:bg-green-700 disabled:opacity-50 flex items-center gap-2">
-              {importing ? 'Arşivleniyor...' : 'Arşivlemeyi Başlat'}
+            <button onClick={onClose} className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-100">Vazgeç</button>
+            <button onClick={handleImport} disabled={selected.size === 0} className="px-6 py-2 rounded-lg bg-green-600 text-white font-bold hover:bg-green-700 disabled:opacity-50 flex items-center gap-2">
+              Arşivlemeyi Başlat
             </button>
           </div>
         </div>
