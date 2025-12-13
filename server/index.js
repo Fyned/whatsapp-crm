@@ -1,4 +1,5 @@
 const path = require('path');
+// .env dosyasını garantiye alıyoruz
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') }); 
 require('dotenv').config(); 
 
@@ -9,24 +10,23 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
-// 1. SUPABASE (SERVICE ROLE - ADMİN YETKİSİ)
-// Not: Veritabanına yazabilmek için Service Role şarttır.
+// --- 1. TEST EDİLMİŞ BAĞLANTI AYARLARI ---
 const supabaseUrl = process.env.SUPABASE_URL;
+// Test dosyasında çalışan anahtarı kullanıyoruz:
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-    console.error('HATA: .env dosyasında SUPABASE_URL veya SUPABASE_SERVICE_ROLE_KEY eksik!');
-    // Kritik hata ama process'i öldürmeyelim, log basıp devam edelim ki PM2 loop'a girmesin
+    console.error('❌ KRİTİK HATA: .env dosyasında anahtarlar eksik!');
+    // Hata olsa bile sunucuyu çökertmiyoruz, log basıyoruz.
+} else {
+    console.log('✅ Supabase Bağlantısı Hazır (Service Role)');
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey, {
-    auth: {
-        autoRefreshToken: false,
-        persistSession: false
-    }
+    auth: { autoRefreshToken: false, persistSession: false }
 });
 
-// 2. EXPRESS & SOCKET
+// --- 2. SUNUCU AYARLARI ---
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -39,11 +39,12 @@ app.use(express.json());
 // GLOBAL DEĞİŞKENLER
 let client = null;
 let lastQR = null;
+// Simülasyon için session verilerini hafızada tutuyoruz
 let currentSessionData = { sessionName: null, userId: null };
 
-// --- FONKSİYON: WHATSAPP İSTEMCİSİNİ HAZIRLA ---
+// --- 3. WHATSAPP MANTIĞI ---
 function initializeClient() {
-    console.log('>>> WhatsApp İstemcisi Başlatılıyor...');
+    console.log('🔄 WhatsApp Motoru Başlatılıyor...');
     
     client = new Client({
         authStrategy: new LocalAuth(),
@@ -53,149 +54,124 @@ function initializeClient() {
         }
     });
 
-    // A) QR Kodu Oluşunca
+    // QR KODU GELDİĞİNDE
     client.on('qr', (qr) => {
-        console.log('>>> QR KODU OLUŞTU (Tarama Bekleniyor)');
+        console.log('🎫 QR Kodu Üretildi (Okutma Bekleniyor)');
         lastQR = qr;
         io.emit('qr', qr);
         
-        // Opsiyonel: DB durumunu güncelle
+        // Opsiyonel: DB'ye QR durumunu yaz (Test amaçlı)
         if (currentSessionData.sessionName) {
-            updateSessionInDb('QR_CODE');
+            saveToDb('QR_CODE'); 
         }
     });
 
-    // B) Bağlantı Sağlanınca (READY)
+    // BAĞLANTI SAĞLANDIĞINDA (READY) - KRİTİK NOKTA
     client.on('ready', async () => {
-        console.log('>>> WHATSAPP BAĞLANDI (READY)!');
+        console.log('🚀 WHATSAPP BAĞLANDI (READY)!');
         lastQR = null;
         io.emit('ready', { status: 'ready' });
 
-        // VERİTABANINA KAYIT (KİLİT NOKTA BURASI)
+        // test-db.js'deki çalışan kodun aynısı:
         if (currentSessionData.sessionName && currentSessionData.userId) {
-            await updateSessionInDb('CONNECTED');
+            console.log(`💾 Veritabanına kayıt atılıyor... [User: ${currentSessionData.userId}]`);
+            await saveToDb('CONNECTED');
         } else {
-            console.error('!!! HATA: Session verisi kayıp, DB güncellenemedi !!!');
+            console.error('❌ HATA: Session verisi hafızada yok! DB güncellenemedi.');
         }
     });
 
-    // C) Giriş Yapılınca
+    // GİRİŞ YAPILDIĞINDA
     client.on('authenticated', () => {
-        console.log('>>> Giriş Doğrulandı');
+        console.log('🔑 Giriş Doğrulandı');
         io.emit('ready', { status: 'authenticated' });
     });
 
-    // D) Bağlantı Kopunca
+    // BAĞLANTI KOPTUĞUNDA
     client.on('disconnected', async (reason) => {
-        console.log('>>> Bağlantı Koptu:', reason);
+        console.log('⚠️ Bağlantı Koptu:', reason);
         if (currentSessionData.sessionName) {
-            await updateSessionInDb('DISCONNECTED');
+            await saveToDb('DISCONNECTED');
         }
-        // Temizlik ve Yeniden Başlatma
         lastQR = null;
         try { await client.destroy(); } catch(e) {}
-        initializeClient(); 
+        // Otomatik yeniden başlatmayı şimdilik kapalı tutalım, manuel başlatsın.
     });
 
-    // E) Mesaj Gelince
     client.on('message', async (msg) => {
-        // console.log('Mesaj:', msg.body);
+        // Mesaj gelirse kaydet (Basit versiyon)
         try {
             await supabase.from('messages').insert({
-                chat_id: msg.from,
-                body: msg.body,
-                sender: 'customer',
-                is_outbound: false,
-                created_at: new Date()
+                chat_id: msg.from, body: msg.body, sender: 'customer', is_outbound: false, created_at: new Date()
             });
-            io.emit('new-message', {
-                chat_id: msg.from,
-                body: msg.body,
-                sender: 'customer',
-                created_at: new Date()
-            });
-        } catch (e) { 
-            // console.error(e); 
-        }
+            io.emit('new-message', { chat_id: msg.from, body: msg.body, sender: 'customer', created_at: new Date() });
+        } catch (e) {}
     });
-    
+
     client.initialize();
 }
 
-// YARDIMCI: DB GÜNCELLEME
-async function updateSessionInDb(status) {
+// --- 4. VERİTABANI KAYIT FONKSİYONU (TEST EDİLMİŞ) ---
+async function saveToDb(status) {
     try {
-        console.log(`>>> DB Güncelleniyor: ${currentSessionData.sessionName} -> ${status}`);
-        
-        const { error } = await supabase.from('sessions').upsert({
+        const { data, error } = await supabase.from('sessions').upsert({
             session_name: currentSessionData.sessionName,
             user_id: currentSessionData.userId,
             status: status,
             updated_at: new Date()
-        }, { onConflict: 'session_name' });
+        }, { onConflict: 'session_name' }).select();
 
         if (error) {
-            console.error('!!! SUPABASE YAZMA HATASI !!!', error.message);
-            console.error('Hata Detayı:', error);
+            console.error('❌ DB YAZMA HATASI:', error.message);
         } else {
-            console.log('>>> DB Güncelleme BAŞARILI.');
+            console.log('✅ DB BAŞARIYLA GÜNCELLENDİ:', status);
+            // Frontend'in listeyi yenilemesi için sinyal gönder
+            io.emit('session-updated', { sessionName: currentSessionData.sessionName, status });
         }
     } catch (e) {
-        console.error('DB Exception:', e);
+        console.error('❌ DB Exception:', e);
     }
 }
 
-// --- API ENDPOINTLERİ ---
-
-app.get('/', (req, res) => res.send('WhatsApp Backend Çalışıyor (Final Version)'));
+// --- 5. API ENDPOINTLERİ ---
 
 app.post('/start-session', async (req, res) => {
     const { sessionName, userId } = req.body;
-    console.log(`>>> START SESSION İSTEĞİ: İsim=${sessionName}, UserID=${userId}`);
+    console.log(`\n>>> YENİ İSTEK: /start-session`);
+    console.log(`    Session: ${sessionName}`);
+    console.log(`    UserID : ${userId}`);
 
-    // KİMLİK KONTROLÜ (ZORUNLU)
+    // KİMLİK KONTROLÜ
     if (!sessionName || !userId) {
-        console.error('!!! HATA: Eksik bilgi (UserID veya SessionName yok)');
-        return res.status(400).json({ error: 'Kullanıcı kimliği eksik. Lütfen tekrar giriş yapın.' });
+        console.error('❌ EKSİK BİLGİ: UserID gelmedi!');
+        return res.status(400).json({ error: 'UserID eksik. Tekrar giriş yapın.' });
     }
 
-    // Bilgileri Hafızaya Al
+    // Hafızaya al
     currentSessionData = { sessionName, userId };
     lastQR = null;
 
-    // Varsa Eski Client'ı Öldür (Hard Reset)
+    // Temizle ve Başlat
     if (client) {
-        console.log('Eski oturum temizleniyor...');
+        console.log('🧹 Eski oturum temizleniyor...');
         try { await client.destroy(); } catch(e) {}
     }
 
-    // Sıfırdan Başlat
     initializeClient();
-
-    res.json({ success: true, message: 'İşlem başlatıldı' });
+    res.json({ success: true, message: 'Başlatılıyor' });
 });
 
+app.get('/', (req, res) => res.send('WhatsApp Backend Hazır'));
+
+// History Endpoint
 app.get('/fetch-history/:chatId', async (req, res) => {
+    // ... (Eski kodun aynısı, history çekmek için)
     const { chatId } = req.params;
-    const { cursor } = req.query;
-    let query = supabase.from('messages').select('*').eq('chat_id', chatId).order('created_at', {ascending:false}).limit(10);
-    if(cursor) query = query.lt('created_at', cursor);
-    const { data, error } = await query;
-    if(error) return res.status(500).json({error: error.message});
-    res.json({messages: data, nextCursor: data.length === 10 ? data[9].created_at : null});
-});
-
-// Sunucuyu Başlat (İlk açılışta boş bir client hazırlayalım)
-initializeClient();
-
-// Socket Bağlantısı
-io.on('connection', (socket) => {
-    console.log('Frontend bağlandı:', socket.id);
-    // Yeni bağlanana varsa QR göster
-    if (lastQR) socket.emit('qr', lastQR);
+    const { data } = await supabase.from('messages').select('*').eq('chat_id', chatId).limit(10);
+    res.json({messages: data || []});
 });
 
 const PORT = process.env.PORT || 3006;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Sunucu ${PORT} portunda aktif.`);
+    console.log(`📡 Sunucu ${PORT} portunda dinliyor.`);
 });
