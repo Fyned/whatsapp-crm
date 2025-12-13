@@ -79,7 +79,6 @@ class WhatsappManager {
         }
     }
 
-    // --- DB KAYIT ---
     async saveMessageToDb(sessionName, msg) {
         try {
             const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
@@ -114,58 +113,79 @@ class WhatsappManager {
         } catch (err) { console.error('DB Kayıt Hatası:', err); }
     }
 
-    // --- API HELPER ---
+    // --- GÜNCELLENEN KISIM: OFFLINE MOD DESTEKLİ LIST CHATS ---
     async listChats(sessionName) {
         const client = this.sessions.get(sessionName);
-        if (!client) return [];
-        const chats = await client.getChats();
-        return chats.filter(c => !c.isGroup).map(c => ({
-            id: c.id._serialized,
-            phone_number: c.id.user,
-            push_name: c.name || c.id.user,
-            unread: c.unreadCount,
-            timestamp: c.timestamp
+        
+        // 1. Seçenek: WhatsApp Bağlıysa Canlı Çek (En güncel veri)
+        if (client) {
+            try {
+                const chats = await client.getChats();
+                return chats
+                    .filter(c => !c.isGroup)
+                    .map(c => ({
+                        id: c.id._serialized,
+                        phone_number: c.id.user,
+                        push_name: c.name || c.id.user,
+                        unread: c.unreadCount,
+                        timestamp: c.timestamp
+                    }));
+            } catch (error) {
+                console.log(`[${sessionName}] WhatsApp erişim hatası, veritabanına geçiliyor...`);
+            }
+        }
+
+        // 2. Seçenek: Bağlantı Yoksa Veritabanından Çek (Offline Mod)
+        console.log(`[${sessionName}] Offline mod: Veritabanından sohbetler çekiliyor...`);
+        
+        const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
+        if (!session) return [];
+
+        const { data: contacts } = await supabase
+            .from('contacts')
+            .select('*')
+            .eq('session_id', session.id)
+            .order('updated_at', { ascending: false }); // En son konuşulanlar üstte
+
+        if (!contacts) return [];
+
+        // Frontend formatına dönüştür
+        return contacts.map(c => ({
+            id: c.phone_number + '@c.us',
+            phone_number: c.phone_number,
+            push_name: c.push_name || c.phone_number,
+            unread: 0, // Offline modda okunmamış sayısı veremiyoruz (şimdilik)
+            timestamp: new Date(c.updated_at).getTime() / 1000
         }));
     }
 
-    // --- DÜZELTİLEN FONKSİYON: loadHistory ---
     async loadHistory(sessionName, contactNumber, limit = 20, beforeId = null) {
         const client = this.sessions.get(sessionName);
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
         if (!session) throw new Error('Session yok');
 
-        // 1. Sorguyu Hazırla
         let query = supabase.from('messages')
             .select('*')
             .eq('session_id', session.id)
             .eq('contact_id', contactNumber)
-            .order('timestamp', { ascending: false }) // En yeniler en üstte
+            .order('timestamp', { ascending: false })
             .limit(limit);
 
-        // 2. Eğer 'beforeId' varsa, o mesajın zamanını bul ve ondan eskileri getir
         if (beforeId) {
-            const { data: refMsg } = await supabase.from('messages')
-                .select('timestamp')
-                .eq('whatsapp_id', beforeId)
-                .single();
-            
-            if (refMsg) {
-                // Bu zamandan KÜÇÜK (daha eski) olanları getir
-                query = query.lt('timestamp', refMsg.timestamp);
-            }
+            const { data: refMsg } = await supabase.from('messages').select('timestamp').eq('whatsapp_id', beforeId).single();
+            if (refMsg) query = query.lt('timestamp', refMsg.timestamp);
         }
 
         const { data: dbMessages } = await query;
 
-        // 3. DB boşsa ve ilk yüklemeyse WhatsApp'tan çek (Sadece ilk yüklemede mantıklı)
+        // Sadece client varsa ve DB boşsa WhatsApp'tan çekmeyi dene
         if ((!dbMessages || dbMessages.length === 0) && client && !beforeId) {
             try {
                 const chatId = `${contactNumber}@c.us`;
                 const chat = await client.getChatById(chatId);
-                const fetchedMessages = await chat.fetchMessages({ limit: 30 }); // İlk etapta 30 tane çek
+                const fetchedMessages = await chat.fetchMessages({ limit: 30 });
                 for (const msg of fetchedMessages) { await this.saveMessageToDb(sessionName, msg); }
                 
-                // DB'den tekrar çek
                 const { data: refreshed } = await supabase.from('messages')
                     .select('*')
                     .eq('session_id', session.id)
@@ -177,13 +197,13 @@ class WhatsappManager {
             } catch (e) {}
         }
 
-        // Frontend'e kronolojik (Eskiden > Yeniye) gönder
         return { messages: dbMessages ? dbMessages.reverse() : [] };
     }
 
     async sendMessage(sessionName, targetNumber, text) {
         const client = this.sessions.get(sessionName);
-        if (!client) throw new Error('Oturum yok');
+        if (!client) throw new Error('Oturum bağlı değil (Offline)'); // Offline modda mesaj atılamaz
+        
         const chatId = `${targetNumber}@c.us`;
         const msg = await client.sendMessage(chatId, text);
         await this.saveMessageToDb(sessionName, msg);
