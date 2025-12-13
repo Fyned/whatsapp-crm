@@ -1,6 +1,9 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const supabase = require('../db');
+const fs = require('fs');
+const path = require('path');
+const mime = require('mime-types'); // Dosya uzantısı için (yoksa npm install mime-types yap)
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const cleanPhone = (id) => id ? id.replace(/\D/g, '') : null;
@@ -26,7 +29,6 @@ class WhatsappManager {
 
     async startSession(sessionName, userId = null, isRestoring = false) {
         if (this.sessions.has(sessionName)) return;
-
         console.log(`[${sessionName}] Başlatılıyor...`);
         
         if (!isRestoring) {
@@ -90,6 +92,36 @@ class WhatsappManager {
             
             if (rawContactId.includes('@g.us')) return; 
 
+            // Medya İşleme
+            let mediaUrl = null;
+            let mimetype = null;
+            
+            if (msg.hasMedia) {
+                try {
+                    const media = await msg.downloadMedia();
+                    if (media) {
+                        // Dosya uzantısını bul
+                        const extension = mime.extension(media.mimetype) || 'bin';
+                        const fileName = `${msg.id.id}.${extension}`;
+                        const filePath = path.join(__dirname, '../../public/media', fileName);
+                        
+                        // Klasör yoksa oluştur (Garanti olsun)
+                        const dir = path.dirname(filePath);
+                        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+                        // Dosyayı kaydet
+                        fs.writeFileSync(filePath, media.data, 'base64');
+                        
+                        // URL oluştur (Frontend buradan erişecek)
+                        mediaUrl = `/media/${fileName}`;
+                        mimetype = media.mimetype;
+                        console.log(`📁 Medya kaydedildi: ${fileName}`);
+                    }
+                } catch (e) {
+                    console.error('Medya indirme hatası:', e.message);
+                }
+            }
+
             const contactName = msg._data?.notifyName || msg._data?.pushname || contactPhone;
             
             await supabase.from('contacts').upsert({
@@ -105,6 +137,8 @@ class WhatsappManager {
                 whatsapp_id: msg.id._serialized,
                 body: msg.body,
                 type: msg.type,
+                media_url: mediaUrl, // Yeni alan
+                mimetype: mimetype,  // Yeni alan
                 is_outbound: isOutbound,
                 timestamp: msg.timestamp,
                 created_at: new Date(msg.timestamp * 1000)
@@ -113,31 +147,24 @@ class WhatsappManager {
         } catch (err) { console.error('DB Kayıt Hatası:', err); }
     }
 
-    // --- GÜNCELLENEN KISIM: OFFLINE MOD DESTEKLİ LIST CHATS ---
     async listChats(sessionName) {
         const client = this.sessions.get(sessionName);
         
-        // 1. Seçenek: WhatsApp Bağlıysa Canlı Çek (En güncel veri)
+        // 1. WhatsApp Bağlıysa
         if (client) {
             try {
                 const chats = await client.getChats();
-                return chats
-                    .filter(c => !c.isGroup)
-                    .map(c => ({
-                        id: c.id._serialized,
-                        phone_number: c.id.user,
-                        push_name: c.name || c.id.user,
-                        unread: c.unreadCount,
-                        timestamp: c.timestamp
-                    }));
-            } catch (error) {
-                console.log(`[${sessionName}] WhatsApp erişim hatası, veritabanına geçiliyor...`);
-            }
+                return chats.filter(c => !c.isGroup).map(c => ({
+                    id: c.id._serialized,
+                    phone_number: c.id.user,
+                    push_name: c.name || c.id.user,
+                    unread: c.unreadCount,
+                    timestamp: c.timestamp
+                }));
+            } catch (e) {}
         }
 
-        // 2. Seçenek: Bağlantı Yoksa Veritabanından Çek (Offline Mod)
-        console.log(`[${sessionName}] Offline mod: Veritabanından sohbetler çekiliyor...`);
-        
+        // 2. Offline Mod (DB'den)
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
         if (!session) return [];
 
@@ -145,16 +172,15 @@ class WhatsappManager {
             .from('contacts')
             .select('*')
             .eq('session_id', session.id)
-            .order('updated_at', { ascending: false }); // En son konuşulanlar üstte
+            .order('updated_at', { ascending: false });
 
         if (!contacts) return [];
 
-        // Frontend formatına dönüştür
         return contacts.map(c => ({
             id: c.phone_number + '@c.us',
             phone_number: c.phone_number,
             push_name: c.push_name || c.phone_number,
-            unread: 0, // Offline modda okunmamış sayısı veremiyoruz (şimdilik)
+            unread: 0,
             timestamp: new Date(c.updated_at).getTime() / 1000
         }));
     }
@@ -178,7 +204,7 @@ class WhatsappManager {
 
         const { data: dbMessages } = await query;
 
-        // Sadece client varsa ve DB boşsa WhatsApp'tan çekmeyi dene
+        // DB boşsa WhatsApp'tan çek
         if ((!dbMessages || dbMessages.length === 0) && client && !beforeId) {
             try {
                 const chatId = `${contactNumber}@c.us`;
@@ -202,8 +228,7 @@ class WhatsappManager {
 
     async sendMessage(sessionName, targetNumber, text) {
         const client = this.sessions.get(sessionName);
-        if (!client) throw new Error('Oturum bağlı değil (Offline)'); // Offline modda mesaj atılamaz
-        
+        if (!client) throw new Error('Offline modda mesaj atılamaz');
         const chatId = `${targetNumber}@c.us`;
         const msg = await client.sendMessage(chatId, text);
         await this.saveMessageToDb(sessionName, msg);
