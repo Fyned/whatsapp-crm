@@ -9,7 +9,7 @@ class WhatsappManager {
     constructor() {
         this.io = null;
         this.sessions = new Map();
-        this.restoreSessions(); // Sunucu açılınca eski oturumları topla
+        this.restoreSessions(); 
     }
 
     setSocketIO(io) { this.io = io; }
@@ -30,7 +30,6 @@ class WhatsappManager {
         console.log(`[${sessionName}] Başlatılıyor...`);
         
         if (!isRestoring) {
-            // DB'ye ilk kayıt
             await supabase.from('sessions').upsert({
                 session_name: sessionName,
                 user_id: userId,
@@ -46,40 +45,26 @@ class WhatsappManager {
             }
         });
 
-        // 1. QR Kod
         client.on('qr', async (qr) => {
-            console.log(`[${sessionName}] QR Kod Üretildi.`);
+            console.log(`[${sessionName}] QR Geldi.`);
             try {
-                // Base64 Resim oluşturuyoruz
                 const qrImage = await qrcode.toDataURL(qr);
-                
-                // Frontend'e gönder
                 if (this.io) this.io.emit('qr', qrImage);
-                
-                // DB'ye kaydet
-                await supabase.from('sessions')
-                    .update({ qr_code: qrImage, status: 'QR_READY' })
-                    .eq('session_name', sessionName);
-            } catch (e) { console.error('QR Hatası:', e); }
+                await supabase.from('sessions').update({ qr_code: qrImage, status: 'QR_READY' }).eq('session_name', sessionName);
+            } catch (e) { console.error('QR Error:', e); }
         });
 
-        // 2. Bağlandı
         client.on('ready', async () => {
             console.log(`[${sessionName}] ✅ BAĞLANDI!`);
             if (this.io) this.io.emit('ready', { sessionName });
-            
-            await supabase.from('sessions')
-                .update({ status: 'CONNECTED', qr_code: null })
-                .eq('session_name', sessionName);
+            await supabase.from('sessions').update({ status: 'CONNECTED', qr_code: null }).eq('session_name', sessionName);
         });
 
-        // 3. Mesaj Geldi/Gitti
         client.on('message_create', async (msg) => {
             if (msg.from === 'status@broadcast') return;
             await this.saveMessageToDb(sessionName, msg);
         });
 
-        // 4. Koptu
         client.on('disconnected', async () => {
             console.log(`[${sessionName}] Koptu.`);
             await supabase.from('sessions').update({ status: 'DISCONNECTED' }).eq('session_name', sessionName);
@@ -104,11 +89,10 @@ class WhatsappManager {
             const rawContactId = isOutbound ? msg.to : msg.from;
             const contactPhone = cleanPhone(rawContactId);
             
-            if (rawContactId.includes('@g.us')) return; // Grup engelle
+            if (rawContactId.includes('@g.us')) return; 
 
             const contactName = msg._data?.notifyName || msg._data?.pushname || contactPhone;
             
-            // Kişiyi kaydet
             await supabase.from('contacts').upsert({
                 session_id: session.id,
                 phone_number: contactPhone,
@@ -116,7 +100,6 @@ class WhatsappManager {
                 updated_at: new Date()
             }, { onConflict: 'session_id, phone_number' });
 
-            // Mesajı kaydet
             await supabase.from('messages').upsert({
                 session_id: session.id,
                 contact_id: contactPhone,
@@ -145,33 +128,56 @@ class WhatsappManager {
         }));
     }
 
-    async loadHistory(sessionName, contactNumber, limit = 20) {
+    // --- DÜZELTİLEN FONKSİYON: loadHistory ---
+    async loadHistory(sessionName, contactNumber, limit = 20, beforeId = null) {
         const client = this.sessions.get(sessionName);
         const { data: session } = await supabase.from('sessions').select('id').eq('session_name', sessionName).single();
         if (!session) throw new Error('Session yok');
 
-        // Önce DB'den çek
+        // 1. Sorguyu Hazırla
         let query = supabase.from('messages')
             .select('*')
             .eq('session_id', session.id)
             .eq('contact_id', contactNumber)
-            .order('timestamp', { ascending: false })
+            .order('timestamp', { ascending: false }) // En yeniler en üstte
             .limit(limit);
+
+        // 2. Eğer 'beforeId' varsa, o mesajın zamanını bul ve ondan eskileri getir
+        if (beforeId) {
+            const { data: refMsg } = await supabase.from('messages')
+                .select('timestamp')
+                .eq('whatsapp_id', beforeId)
+                .single();
+            
+            if (refMsg) {
+                // Bu zamandan KÜÇÜK (daha eski) olanları getir
+                query = query.lt('timestamp', refMsg.timestamp);
+            }
+        }
 
         const { data: dbMessages } = await query;
 
-        // DB boşsa WhatsApp'tan çek
-        if ((!dbMessages || dbMessages.length < 5) && client) {
+        // 3. DB boşsa ve ilk yüklemeyse WhatsApp'tan çek (Sadece ilk yüklemede mantıklı)
+        if ((!dbMessages || dbMessages.length === 0) && client && !beforeId) {
             try {
                 const chatId = `${contactNumber}@c.us`;
                 const chat = await client.getChatById(chatId);
-                const fetchedMessages = await chat.fetchMessages({ limit: 50 });
+                const fetchedMessages = await chat.fetchMessages({ limit: 30 }); // İlk etapta 30 tane çek
                 for (const msg of fetchedMessages) { await this.saveMessageToDb(sessionName, msg); }
                 
-                const { data: refreshed } = await query;
+                // DB'den tekrar çek
+                const { data: refreshed } = await supabase.from('messages')
+                    .select('*')
+                    .eq('session_id', session.id)
+                    .eq('contact_id', contactNumber)
+                    .order('timestamp', { ascending: false })
+                    .limit(limit);
+                    
                 return { messages: refreshed ? refreshed.reverse() : [] };
             } catch (e) {}
         }
+
+        // Frontend'e kronolojik (Eskiden > Yeniye) gönder
         return { messages: dbMessages ? dbMessages.reverse() : [] };
     }
 
